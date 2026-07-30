@@ -55,7 +55,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
         if let Some(current) = state::read(state_path)? {
             monitor_pid = current.value.claude_pid;
             let new_mode = current.value.kind;
-            if new_mode == StateKind::Busy
+            if matches!(new_mode, StateKind::Busy | StateKind::Waiting)
                 && (current.value.transcript_path != transcript_path
                     || current.value.transcript_offset != transcript_start)
             {
@@ -78,22 +78,6 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                         &format!("{} Working | {}", FRAMES[frame], current.value.project),
                     )?;
                     frame = (frame + 1) % FRAMES.len();
-                    if now.duration_since(last_scan) >= Duration::from_millis(500) {
-                        let (interrupted, position) = transcript_has_interrupt(
-                            transcript_path.as_deref(),
-                            transcript_start,
-                            transcript_position,
-                        );
-                        transcript_position = position;
-                        last_scan = now;
-                        if interrupted && set_idle_if_unchanged(state_path, &current)? {
-                            mode = Some(StateKind::Idle);
-                            write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
-                            static_title = Some((StateKind::Idle, current.value.project.clone()));
-                        } else if interrupted {
-                            transcript_position = transcript_start;
-                        }
-                    }
                 }
                 StateKind::Idle => {
                     let title = (StateKind::Idle, current.value.project.clone());
@@ -118,6 +102,25 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                         write_title(tty, "")?;
                         static_title = Some(title);
                     }
+                }
+            }
+
+            if matches!(new_mode, StateKind::Busy | StateKind::Waiting)
+                && now.duration_since(last_scan) >= Duration::from_millis(500)
+            {
+                let (interrupted, position) = transcript_has_interrupt(
+                    transcript_path.as_deref(),
+                    transcript_start,
+                    transcript_position,
+                );
+                transcript_position = position;
+                last_scan = now;
+                if interrupted && set_idle_if_unchanged(state_path, &current)? {
+                    mode = Some(StateKind::Idle);
+                    write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
+                    static_title = Some((StateKind::Idle, current.value.project.clone()));
+                } else if interrupted {
+                    transcript_position = transcript_start;
                 }
             }
         }

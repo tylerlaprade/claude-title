@@ -34,7 +34,7 @@ fn cli_install_and_uninstall_preserve_prior_configuration() {
     assert!(second_install.contains("Claude Code settings: already set"));
 
     let installed = read_json(&settings);
-    assert_eq!(count_command(&installed, "claude-title hook"), 7);
+    assert_eq!(count_command(&installed, "claude-title hook"), 9);
     assert_eq!(installed["env"]["OTHER"], "yes");
     let receipt = read_json(&home.path().join(".config/claude-title/install.json"));
     assert_eq!(receipt["previous_terminal_title"], "1");

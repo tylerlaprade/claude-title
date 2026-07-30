@@ -124,6 +124,20 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     let old_marker_output = pty.read_for(Duration::from_millis(650));
     assert!(!contains(&old_marker_output, b"\xe2\x9c\xb3 Ready"));
 
+    run_hook(
+        &pty.slave_path,
+        first_claude.0.id(),
+        r#"{"hook_event_name":"Notification","cwd":"/tmp/example"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
+
+    run_hook(
+        &pty.slave_path,
+        first_claude.0.id(),
+        r#"{"hook_event_name":"PostToolUse","cwd":"/tmp/example"}"#,
+    );
+    pty.wait_for(b" Working | example\x07");
+
     let mut transcript_file = OpenOptions::new().append(true).open(&transcript).unwrap();
     transcript_file
         .write_all(b"\n\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user")
@@ -133,9 +147,25 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/example","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | example\x07");
+
+    run_hook(
+        &pty.slave_path,
+        first_claude.0.id(),
         r#"{"hook_event_name":"Notification","cwd":"/tmp/example"}"#,
     );
     pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
+
+    let mut transcript_file = OpenOptions::new().append(true).open(&transcript).unwrap();
+    transcript_file
+        .write_all(b"\n\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user")
+        .unwrap();
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
     run_hook(
         &pty.slave_path,

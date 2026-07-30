@@ -80,7 +80,9 @@ pub fn run() -> Result<()> {
 fn state_kind_for_event(event: &str) -> Option<StateKind> {
     match event {
         "SessionStart" | "Stop" | "StopFailure" => Some(StateKind::Idle),
-        "UserPromptSubmit" | "PreToolUse" => Some(StateKind::Busy),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
+            Some(StateKind::Busy)
+        }
         "Notification" => Some(StateKind::Waiting),
         "SessionEnd" => Some(StateKind::End),
         _ => None,

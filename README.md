@@ -18,7 +18,7 @@ claude-title install
 Restart Claude Code after installation. The `claude-title` binary must remain
 in `PATH`.
 
-The installer adds seven Claude Code hooks and sets
+The installer adds nine Claude Code hooks and sets
 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` in `~/.claude/settings.json`. It keeps
 all unrelated settings and hooks. It records the previous title setting in
 `~/.config/claude-title/install.json`.

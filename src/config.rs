@@ -17,10 +17,22 @@ const OWN_COMMANDS: [&str; 7] = [
     "claude-title waiting",
     "claude-title end",
 ];
-const HOOKS: [(&str, Option<&str>); 7] = [
+// Completing one of the matched tools is what resolves its dialog; other tools
+// finishing must not clear the waiting state their sibling's open dialog set.
+// Matchers rely on Claude Code's exact-name list syntax; characters outside
+// [a-zA-Z0-9_|, -] silently switch matching to an unanchored regex.
+const HOOKS: [(&str, Option<&str>); 9] = [
     ("SessionStart", Some("startup|resume|clear")),
     ("UserPromptSubmit", None),
     ("PreToolUse", None),
+    (
+        "PostToolUse",
+        Some("AskUserQuestion|EnterPlanMode|ExitPlanMode"),
+    ),
+    (
+        "PostToolUseFailure",
+        Some("AskUserQuestion|EnterPlanMode|ExitPlanMode"),
+    ),
     ("Stop", None),
     ("StopFailure", None),
     ("Notification", Some("permission_prompt")),
