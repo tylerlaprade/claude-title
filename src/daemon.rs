@@ -79,10 +79,17 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     )?;
                     frame = (frame + 1) % FRAMES.len();
                 }
-                StateKind::Idle => {
-                    let title = (StateKind::Idle, current.value.project.clone());
+                StateKind::Idle | StateKind::Unknown => {
+                    let title = (new_mode, current.value.project.clone());
                     if static_title.as_ref() != Some(&title) {
                         write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
+                        static_title = Some(title);
+                    }
+                }
+                StateKind::Pending => {
+                    let title = (StateKind::Pending, current.value.project.clone());
+                    if static_title.as_ref() != Some(&title) {
+                        write_title(tty, &format!("⧗ Waiting | {}", current.value.project))?;
                         static_title = Some(title);
                     }
                 }

@@ -196,6 +196,75 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     assert_eq!(count(&[second_clear, trailing].concat(), b"\x1b]0;\x07"), 1);
 }
 
+#[test]
+fn stop_with_pending_background_tasks_shows_waiting() {
+    let directory = tempfile::tempdir().unwrap();
+    let transcript = directory.path().join("transcript.jsonl");
+    fs::write(&transcript, b"start\n").unwrap();
+    let mut pty = Pty::open();
+    let claude = sleeper();
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/pause","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"sleep","command":"sleep 5"}]}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/pause","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"d1","type":"dream","status":"running","description":"dreaming"},{"id":"a1","type":"auto-mode scan","status":"running","description":"scanning"},{"id":"t1","type":"teammate","status":"running","description":"resting"},{"id":"n1","type":"novel_chore","status":"running","description":"future work"}]}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/pause","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"a2","type":"subagent","status":"running","description":"explore","agent_type":"Explore"}]}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/pause"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
 fn sleeper() -> ChildGuard {
     ChildGuard(
         Command::new("sleep")

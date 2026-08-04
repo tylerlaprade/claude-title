@@ -4,6 +4,7 @@ claude-title shows Claude Code's state in the terminal tab title:
 
 - `⠋ Working | project` while Claude works
 - `✳ Ready | project` when Claude has finished
+- `⧗ Waiting | project` while Claude waits for background tasks
 - `⚠ Action required | project` when Claude needs approval
 
 The moving mark lets you see which Claude tab is active without opening it.

@@ -15,6 +15,14 @@ struct HookInput {
     hook_event_name: Option<String>,
     transcript_path: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    #[serde(default)]
+    background_tasks: Vec<BackgroundTask>,
+}
+
+#[derive(Deserialize)]
+struct BackgroundTask {
+    #[serde(rename = "type", default)]
+    kind: String,
 }
 
 pub fn run() -> Result<()> {
@@ -29,6 +37,11 @@ pub fn run() -> Result<()> {
         .and_then(state_kind_for_event)
     else {
         return Ok(());
+    };
+    let kind = if kind == StateKind::Idle && has_waking_background_task(&input.background_tasks) {
+        StateKind::Pending
+    } else {
+        kind
     };
     let claude_pid = claude_pid()?;
     let Some(tty) = tty_for_pid(claude_pid)? else {
@@ -75,6 +88,21 @@ pub fn run() -> Result<()> {
         spawn_daemon(&tty, &paths.state, &paths.lock, claude_pid)?;
     }
     Ok(())
+}
+
+// Stop reports every in-flight background task, but only work whose completion
+// wakes the session should keep the title off Ready. The excluded kinds never
+// do that: "dream" and "auto-mode scan" are internal idle-time chores, a
+// teammate's registry entry stays "running" even while it idles, and a
+// "cloud session" can park on browser-side user input for the rest of the
+// session. Unrecognized kinds also fall through to Ready.
+fn has_waking_background_task(tasks: &[BackgroundTask]) -> bool {
+    tasks.iter().any(|task| {
+        matches!(
+            task.kind.as_str(),
+            "shell" | "subagent" | "workflow" | "monitor" | "MCP task"
+        )
+    })
 }
 
 fn state_kind_for_event(event: &str) -> Option<StateKind> {

@@ -12,8 +12,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub enum StateKind {
     Busy,
     Idle,
+    Pending,
     Waiting,
     End,
+    // A daemon can outlive the hook binary that spawned it, so a kind written
+    // by a newer hook must parse instead of blinding the daemon to the file.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -121,4 +126,18 @@ fn state_directory() -> Result<PathBuf> {
             .with_context(|| format!("failed to secure {}", directory.display()))?;
     }
     Ok(directory)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_kind_still_parses() {
+        let value: State = serde_json::from_str(
+            r#"{"kind":"someday","epoch":1,"claude_pid":2,"project":"p","transcript_path":null,"transcript_offset":0}"#,
+        )
+        .unwrap();
+        assert_eq!(value.kind, StateKind::Unknown);
+    }
 }
