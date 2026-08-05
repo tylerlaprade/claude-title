@@ -9,6 +9,14 @@ claude-title shows Claude Code's state in the terminal tab title:
 
 The moving mark lets you see which Claude tab is active without opening it.
 
+## Design contract
+
+Codex and Grok already set terminal titles without user-maintained command
+lists. That is the bar here: claude-title must work from behavior it can observe,
+with no command whitelist or per-user classification file. Prefer process-tree,
+socket, task, and hook signals over names. Recheck the live Claude hook contract
+when those signals change.
+
 `⧗ Waiting` appears when Claude ends its turn while background work that will
 wake it — shells, subagents, workflows, monitors, MCP tasks — is still
 running. A background shell that serves rather than finishes (a dev server, a
