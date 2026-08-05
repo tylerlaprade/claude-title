@@ -1,0 +1,3 @@
+#!/bin/sh
+commit-fix
+exit 0

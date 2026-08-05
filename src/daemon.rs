@@ -1,3 +1,4 @@
+use crate::probe;
 use crate::state::{self, StateKind, StoredState};
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -11,6 +12,24 @@ use std::time::{Duration, Instant};
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const INTERRUPT_MARKER: &[u8] =
     b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user";
+const SHELL_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+
+// A shell that vanishes after finishing wakes the session within a beat, and
+// that wake rewrites the state before two probes pass. Two consecutive misses
+// therefore mean the shell ended without a wake — killed from the task list —
+// and nothing else will clear the waiting title.
+const SHELL_GONE_MISSES: u8 = 2;
+
+struct PendingShell {
+    task_id: String,
+    misses: u8,
+}
+
+struct ShellWatch {
+    raw: Vec<u8>,
+    shells: Vec<PendingShell>,
+    last_probe: Instant,
+}
 
 pub fn run(tty_path: &Path, state_path: &Path, lock_path: &Path, initial_pid: u32) -> Result<()> {
     unsafe {
@@ -46,9 +65,10 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
     let mut transcript_path = None;
     let mut transcript_start = 0;
     let mut transcript_position = 0;
-    let mut last_scan = Instant::now() - Duration::from_secs(1);
-    let mut last_liveness_check = Instant::now() - Duration::from_secs(1);
+    let mut last_scan = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+    let mut last_liveness_check = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let mut ended_dead_since = None;
+    let mut shell_watch: Option<ShellWatch> = None;
 
     loop {
         let now = Instant::now();
@@ -130,6 +150,69 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     transcript_position = transcript_start;
                 }
             }
+
+            // While only shells hold the waiting title, keep probing them: one
+            // that starts serving after the turn ended, or that was killed
+            // without the wake a completion brings, would otherwise leave the
+            // title stuck until the next hook event.
+            if new_mode == StateKind::Pending
+                && !current.value.pending_beyond_shells
+                && !current.value.pending_shells.is_empty()
+            {
+                match &shell_watch {
+                    Some(watch) if watch.raw == current.raw => {}
+                    _ => {
+                        shell_watch = Some(ShellWatch {
+                            raw: current.raw.clone(),
+                            shells: current
+                                .value
+                                .pending_shells
+                                .iter()
+                                .map(|task_id| PendingShell {
+                                    task_id: task_id.clone(),
+                                    misses: 0,
+                                })
+                                .collect(),
+                            last_probe: now,
+                        });
+                    }
+                }
+                if let Some(watch) = &mut shell_watch
+                    && now.duration_since(watch.last_probe) >= SHELL_PROBE_INTERVAL
+                {
+                    watch.last_probe = now;
+                    let task_ids: Vec<String> = watch
+                        .shells
+                        .iter()
+                        .map(|shell| shell.task_id.clone())
+                        .collect();
+                    let verdicts = probe::tasks(&current.value.pending_session, &task_ids);
+                    let mut kept = Vec::new();
+                    for (mut shell, verdict) in watch.shells.drain(..).zip(verdicts) {
+                        match verdict {
+                            probe::ShellProbe::Serving => {}
+                            probe::ShellProbe::Gone => {
+                                shell.misses += 1;
+                                if shell.misses < SHELL_GONE_MISSES {
+                                    kept.push(shell);
+                                }
+                            }
+                            probe::ShellProbe::Running | probe::ShellProbe::Unknown => {
+                                shell.misses = 0;
+                                kept.push(shell);
+                            }
+                        }
+                    }
+                    watch.shells = kept;
+                    if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
+                        mode = Some(StateKind::Idle);
+                        write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
+                        static_title = Some((StateKind::Idle, current.value.project.clone()));
+                    }
+                }
+            } else {
+                shell_watch = None;
+            }
         }
 
         if now.duration_since(last_liveness_check) >= Duration::from_secs(1) {
@@ -191,7 +274,7 @@ fn transcript_has_interrupt(path: Option<&Path>, start: u64, position: u64) -> (
         Ok(file) => file,
         Err(_) => return (false, position),
     };
-    let length = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let length = file.metadata().map_or(0, |metadata| metadata.len());
     let position = if position > length { start } else { position };
     let scan_from = start.max(position.saturating_sub(INTERRUPT_MARKER.len() as u64));
     if file.seek(SeekFrom::Start(scan_from)).is_err() {
@@ -220,6 +303,9 @@ fn set_idle_if_unchanged(path: &Path, observed: &StoredState) -> Result<bool> {
     let mut replacement = observed.value.clone();
     replacement.kind = StateKind::Idle;
     replacement.epoch = state::epoch();
+    replacement.pending_session = String::new();
+    replacement.pending_shells = Vec::new();
+    replacement.pending_beyond_shells = false;
     state::write(path, &replacement)?;
     Ok(true)
 }

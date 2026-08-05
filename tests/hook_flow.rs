@@ -77,7 +77,11 @@ impl Pty {
     }
 
     fn wait_for(&mut self, needle: &[u8]) -> Vec<u8> {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        self.wait_for_within(needle, Duration::from_secs(3))
+    }
+
+    fn wait_for_within(&mut self, needle: &[u8], patience: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + patience;
         let mut output = Vec::new();
         while Instant::now() < deadline {
             output.extend(self.read_for(Duration::from_millis(50)));
@@ -265,6 +269,123 @@ fn stop_with_pending_background_tasks_shows_waiting() {
     wait_for_daemon_exit(&pty.slave_path);
 }
 
+#[test]
+fn serving_and_killed_shells_release_the_waiting_title() {
+    let directory = tempfile::tempdir().unwrap();
+    let transcript = directory.path().join("transcript.jsonl");
+    fs::write(&transcript, b"start\n").unwrap();
+    let tasks_root = directory.path().join("tasks-root");
+    let tasks = tasks_root.join("project").join("session").join("tasks");
+    fs::create_dir_all(&tasks).unwrap();
+    let mut pty = Pty::open();
+    let claude = sleeper();
+
+    // Two real background-shell stand-ins, each holding its task output file
+    // open the way Claude Code's spawns do: a TCP listener (a "dev server")
+    // and a plain sleeper (awaited work).
+    let server = ChildGuard(
+        Command::new("python3")
+            .args([
+                "-c",
+                r#"import socket,time; s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(1); time.sleep(45)"#,
+            ])
+            .stdin(Stdio::null())
+            .stdout(File::create(tasks.join("t1serve.output")).unwrap())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut worker = ChildGuard(
+        Command::new("sleep")
+            .arg("45")
+            .stdin(Stdio::null())
+            .stdout(File::create(tasks.join("t2work.output")).unwrap())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let prompt = format!(
+        r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/serve","transcript_path":{}}}"#,
+        serde_json::to_string(&transcript).unwrap()
+    );
+    run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
+    pty.wait_for(b" Working | serve\x07");
+
+    // The listener's process tree holds a listening socket, so it is a server
+    // and must not hold the title at waiting.
+    run_hook_with_tasks_root(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t1serve","type":"shell","status":"running","description":"dev server","command":"npm run dev"}]}"#,
+        &tasks_root,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07");
+
+    run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
+    pty.wait_for(b" Working | serve\x07");
+
+    // The worker holds no socket: awaited work, so the title waits.
+    run_hook_with_tasks_root(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t2work","type":"shell","status":"running","description":"long task","command":"sleep 45"}]}"#,
+        &tasks_root,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | serve\x07");
+
+    // Killing it produces no wake, so the daemon's re-probe must notice that
+    // nothing holds the task's output file anymore and release the title on
+    // its own.
+    worker.0.kill().unwrap();
+    worker.0.wait().unwrap();
+    pty.wait_for_within(
+        b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07",
+        Duration::from_secs(12),
+    );
+
+    // A server that binds its port only after the turn has ended: the hook
+    // sees plain awaited work, so the daemon's re-probe must spot the
+    // listener and release the title on its own.
+    let late = ChildGuard(
+        Command::new("python3")
+            .args([
+                "-c",
+                r#"import socket,time; time.sleep(6); s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(1); time.sleep(45)"#,
+            ])
+            .stdin(Stdio::null())
+            .stdout(File::create(tasks.join("t3late.output")).unwrap())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
+    pty.wait_for(b" Working | serve\x07");
+    run_hook_with_tasks_root(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t3late","type":"shell","status":"running","description":"slow server","command":"npm run dev"}]}"#,
+        &tasks_root,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | serve\x07");
+    pty.wait_for_within(
+        b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07",
+        Duration::from_secs(20),
+    );
+
+    run_hook_with_tasks_root(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/serve"}"#,
+        &tasks_root,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(late);
+    drop(server);
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
 fn sleeper() -> ChildGuard {
     ChildGuard(
         Command::new("sleep")
@@ -278,9 +399,16 @@ fn sleeper() -> ChildGuard {
 }
 
 fn run_hook(tty: &Path, pid: u32, input: &str) {
+    // A root that exists but holds no task files, so probes settle on Unknown
+    // instead of reading real sessions' state.
+    run_hook_with_tasks_root(tty, pid, input, Path::new("/var/empty"));
+}
+
+fn run_hook_with_tasks_root(tty: &Path, pid: u32, input: &str, tasks_root: &Path) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_claude-title"))
         .arg("hook")
         .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+        .env("CLAUDE_TITLE_TASKS_ROOT", tasks_root)
         .env("CLAUDE_TITLE_TTY", tty)
         .env("CLAUDE_TITLE_PID", pid.to_string())
         .env("CLAUDE_PROJECT_DIR", "")
