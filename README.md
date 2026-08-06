@@ -8,7 +8,7 @@ claude-title shows Claude Code's state in the terminal tab title:
 - `⚠ Action required | project` when Claude needs approval
 
 The moving mark lets you see which Claude tab is active without opening it.
-Background shells that serve rather than finish — dev servers, log tails —
+Background shells that serve rather than finish — dev servers, local stacks —
 never hold the waiting title: claude-title watches what actually runs and
 listens, so there is nothing to configure.
 
