@@ -107,7 +107,11 @@ pub fn run() -> Result<()> {
 // session. Unrecognized kinds also fall through to Ready. Shells are probed
 // by task id: one that runs until killed — a dev server holding a listening
 // socket, a bare log tail — never wakes the session, while the rest are
-// awaited work the daemon keeps re-probing during the pause.
+// awaited work the daemon keeps re-probing during the pause. "monitor"
+// counts on the assumption every monitor fires or times out; an upstream
+// flag (dormant in 2.1.221) would auto-arm never-ending ambient monitors on
+// artifact publishes, and if a session pins on Waiting after publishing an
+// artifact, that flag has shipped and "monitor" needs a second look.
 fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (bool, Vec<String>) {
     let mut beyond_shells = false;
     let mut shells = Vec::new();
