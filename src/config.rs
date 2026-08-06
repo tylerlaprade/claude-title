@@ -4,7 +4,7 @@ use serde_json::{Map, Value, json};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const COMMAND: &str = "claude-title hook";
@@ -247,18 +247,59 @@ fn write_settings(path: &Path, root: &Value) -> Result<()> {
     }
     let mut contents = serde_json::to_string_pretty(root)?;
     contents.push('\n');
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = settings_target(path)?;
+    let mode = match fs::metadata(&target) {
+        Ok(metadata) => metadata.permissions().mode(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0o600,
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", target.display()));
+        }
+    };
     let temporary = target.with_extension(format!("tmp-{}", std::process::id()));
-    let result = fs::write(&temporary, contents)
-        .with_context(|| format!("failed to write {}", temporary.display()))
-        .and_then(|()| {
-            fs::rename(&temporary, &target)
-                .with_context(|| format!("failed to replace {}", target.display()))
-        });
+    let result = (|| -> Result<()> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(mode)
+            .open(&temporary)
+            .with_context(|| format!("failed to open {}", temporary.display()))?;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .with_context(|| format!("failed to secure {}", temporary.display()))?;
+        file.write_all(contents.as_bytes())
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
+        drop(file);
+        fs::rename(&temporary, &target)
+            .with_context(|| format!("failed to replace {}", target.display()))
+    })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+fn settings_target(path: &Path) -> Result<PathBuf> {
+    let mut target = path.to_path_buf();
+    for _ in 0..40 {
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let link = fs::read_link(&target)
+                    .with_context(|| format!("failed to read {}", target.display()))?;
+                target = if link.is_absolute() {
+                    link
+                } else {
+                    target.parent().unwrap_or(Path::new(".")).join(link)
+                };
+            }
+            Ok(_) => return Ok(target),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(target),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to inspect {}", target.display()));
+            }
+        }
+    }
+    bail!("too many symbolic links in {}", path.display())
 }
 
 fn remove_owned_hooks(root: &mut Value) -> Result<()> {
@@ -329,7 +370,7 @@ fn object_mut<'a>(value: &'a mut Value, name: &str) -> Result<&'a mut Map<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]
     fn install_preserves_other_hooks_and_is_idempotent() {
@@ -451,6 +492,36 @@ mod tests {
         );
         let root: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
         assert_eq!(root["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1");
+    }
+
+    #[test]
+    fn install_keeps_a_dangling_settings_symlink() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target.json");
+        let path = directory.path().join("settings.json");
+        symlink("target.json", &path).unwrap();
+        install(&path).unwrap();
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let root: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
+        assert_eq!(root["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1");
+    }
+
+    #[test]
+    fn install_preserves_settings_permissions() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, "{}\n").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        install(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]

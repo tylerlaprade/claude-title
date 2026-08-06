@@ -27,8 +27,8 @@ impl Pty {
         let mut slave_fd = -1;
         let result = unsafe {
             libc::openpty(
-                &mut master_fd,
-                &mut slave_fd,
+                &raw mut master_fd,
+                &raw mut slave_fd,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),

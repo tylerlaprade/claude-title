@@ -82,9 +82,8 @@ pub fn read(path: &Path) -> Result<Option<StoredState>> {
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
     };
-    let value = match serde_json::from_slice(&raw) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
+    let Ok(value) = serde_json::from_slice(&raw) else {
+        return Ok(None);
     };
     Ok(Some(StoredState { raw, value }))
 }

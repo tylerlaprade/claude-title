@@ -79,7 +79,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 && (current.value.transcript_path != transcript_path
                     || current.value.transcript_offset != transcript_start)
             {
-                transcript_path = current.value.transcript_path.clone();
+                transcript_path.clone_from(&current.value.transcript_path);
                 transcript_start = current.value.transcript_offset;
                 transcript_position = transcript_start;
             }
@@ -268,9 +268,8 @@ fn transcript_has_interrupt(path: Option<&Path>, start: u64, position: u64) -> (
     let Some(path) = path else {
         return (false, position);
     };
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return (false, position),
+    let Ok(mut file) = File::open(path) else {
+        return (false, position);
     };
     let length = file.metadata().map_or(0, |metadata| metadata.len());
     let position = if position > length { start } else { position };
