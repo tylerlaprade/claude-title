@@ -19,9 +19,10 @@ cargo install claude-title
 claude-title install
 ```
 
-Restart Claude Code afterward, and keep the `claude-title` binary in `PATH`.
-The installer adds its hooks and `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` to
-`~/.claude/settings.json`, touching nothing else.
+Restart Claude Code afterward. The installer adds its hooks — pinned to the
+binary's install path, so rerun `claude-title install` if you move it — and
+`CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` to `~/.claude/settings.json`, touching
+nothing else.
 
 From a checkout, replace the first command with `cargo install --path .`.
 

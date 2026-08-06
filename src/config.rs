@@ -325,13 +325,52 @@ fn remove_owned_hooks(root: &mut Value) -> Result<()> {
                 !hook
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(|command| OWN_COMMANDS.contains(&command))
+                    .is_some_and(is_own_command)
             });
             !commands.is_empty()
         });
         !groups.is_empty()
     });
     Ok(())
+}
+
+// Older installs wrote the bare command; recognize every generation so a
+// reinstall or uninstall cleans them all up.
+fn is_own_command(command: &str) -> bool {
+    if OWN_COMMANDS.contains(&command) {
+        return true;
+    }
+    let Some(program) = command.strip_suffix(" hook") else {
+        return false;
+    };
+    let program = program.trim_matches('"');
+    Path::new(program).file_name() == Some(std::ffi::OsStr::new("claude-title"))
+}
+
+// Hooks run with whatever PATH Claude Code inherits, so record the absolute
+// binary path; a bare command breaks silently when ~/.cargo/bin is missing
+// from that PATH. Test binaries and unusual paths fall back to the bare
+// command, which needs PATH but never a re-run of install.
+fn hook_command() -> String {
+    let Ok(exe) = env::current_exe() else {
+        return COMMAND.to_string();
+    };
+    if exe.file_name() != Some(std::ffi::OsStr::new("claude-title")) {
+        return COMMAND.to_string();
+    }
+    let Some(path) = exe.to_str() else {
+        return COMMAND.to_string();
+    };
+    if path
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "/_.-".contains(character))
+    {
+        format!("{path} hook")
+    } else if !path.contains('"') {
+        format!("\"{path}\" hook")
+    } else {
+        COMMAND.to_string()
+    }
 }
 
 fn add_hook(root: &mut Value, event: &str, matcher: Option<&str>) -> Result<()> {
@@ -354,7 +393,7 @@ fn add_hook(root: &mut Value, event: &str, matcher: Option<&str>) -> Result<()> 
         "hooks".to_string(),
         Value::Array(vec![json!({
             "type": "command",
-            "command": COMMAND
+            "command": hook_command()
         })]),
     );
     groups.push(Value::Object(group));
@@ -492,6 +531,39 @@ mod tests {
         );
         let root: Value = serde_json::from_slice(&fs::read(&target).unwrap()).unwrap();
         assert_eq!(root["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1");
+    }
+
+    #[test]
+    fn own_commands_are_recognized_across_generations() {
+        assert!(is_own_command("claude-title hook"));
+        assert!(is_own_command("claude-title busy prompt"));
+        assert!(is_own_command("/Users/tyler/.cargo/bin/claude-title hook"));
+        assert!(is_own_command("\"/odd path/claude-title\" hook"));
+        assert!(!is_own_command("claude-title-extra hook"));
+        assert!(!is_own_command("session-guard hook"));
+        assert!(!is_own_command("/usr/bin/claude-title daemon"));
+    }
+
+    #[test]
+    fn install_replaces_absolute_path_entries_from_prior_installs() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"/old/place/claude-title hook"}]}]}}"#,
+        )
+        .unwrap();
+        install(&path).unwrap();
+        let root: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let stop = root["hooks"]["Stop"].as_array().unwrap();
+        let commands: Vec<&str> = stop
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().unwrap())
+            .map(|hook| hook["command"].as_str().unwrap())
+            .collect();
+        assert!(!commands.contains(&"/old/place/claude-title hook"));
+        assert_eq!(commands.len(), 1);
+        assert!(is_own_command(commands[0]));
     }
 
     #[test]

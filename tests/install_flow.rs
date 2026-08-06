@@ -33,8 +33,9 @@ fn cli_install_and_uninstall_preserve_prior_configuration() {
     let second_install = run(home.path(), "install");
     assert!(second_install.contains("Claude Code settings: already set"));
 
+    let hook_command = format!("{} hook", env!("CARGO_BIN_EXE_claude-title"));
     let installed = read_json(&settings);
-    assert_eq!(count_command(&installed, "claude-title hook"), 9);
+    assert_eq!(count_command(&installed, &hook_command), 9);
     assert_eq!(installed["env"]["OTHER"], "yes");
     let receipt = read_json(&home.path().join(".config/claude-title/install.json"));
     assert_eq!(receipt["previous_terminal_title"], "1");
@@ -42,7 +43,7 @@ fn cli_install_and_uninstall_preserve_prior_configuration() {
     let first_uninstall = run(home.path(), "uninstall");
     assert!(first_uninstall.contains("Claude Code settings: updated"));
     let removed = read_json(&settings);
-    assert_eq!(count_command(&removed, "claude-title hook"), 0);
+    assert_eq!(count_command(&removed, &hook_command), 0);
     assert_eq!(removed["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1");
     assert_eq!(removed["env"]["OTHER"], "yes");
     assert_eq!(
