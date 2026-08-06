@@ -2,6 +2,8 @@
 name = "claude-title"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+exclude = ["AGENTS.md", "CLAUDE.md", ".hooks"]
 description = "Show Claude Code's live state in the terminal tab title."
 license = "GPL-3.0-only"
 repository = "https://github.com/tylerlaprade/claude-title"

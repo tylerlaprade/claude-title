@@ -238,6 +238,8 @@ fn read_settings(path: &Path) -> Result<Value> {
     serde_json::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
 }
 
+// Write through any symlink and replace atomically: a crash mid-write must
+// never leave the user's Claude settings truncated.
 fn write_settings(path: &Path, root: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -245,7 +247,18 @@ fn write_settings(path: &Path, root: &Value) -> Result<()> {
     }
     let mut contents = serde_json::to_string_pretty(root)?;
     contents.push('\n');
-    fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
+    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let temporary = target.with_extension(format!("tmp-{}", std::process::id()));
+    let result = fs::write(&temporary, contents)
+        .with_context(|| format!("failed to write {}", temporary.display()))
+        .and_then(|()| {
+            fs::rename(&temporary, &target)
+                .with_context(|| format!("failed to replace {}", target.display()))
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn remove_owned_hooks(root: &mut Value) -> Result<()> {

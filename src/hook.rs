@@ -125,7 +125,12 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
         shells = shells
             .into_iter()
             .zip(verdicts)
-            .filter(|(_, verdict)| !matches!(verdict, probe::ShellProbe::Endless))
+            .filter(|(_, verdict)| {
+                !matches!(
+                    verdict,
+                    probe::ShellProbe::Endless | probe::ShellProbe::Gone
+                )
+            })
             .map(|(id, _)| id)
             .collect();
     }
@@ -163,7 +168,7 @@ fn tty_for_pid(pid: u32) -> Result<Option<PathBuf>> {
         }));
     }
 
-    let output = Command::new("ps")
+    let output = Command::new("/bin/ps")
         .args(["-o", "tty=", "-p", &pid.to_string()])
         .output()
         .context("failed to inspect Claude's terminal")?;

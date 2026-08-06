@@ -156,7 +156,7 @@ impl ProcessTable {
     fn capture() -> Self {
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut programs = HashMap::new();
-        let output = Command::new("ps")
+        let output = Command::new("/bin/ps")
             .args(["-axo", "pid=,ppid=,comm="])
             .output();
         if let Ok(output) = output {

@@ -338,6 +338,18 @@ fn serving_and_killed_shells_release_the_waiting_title() {
         Duration::from_secs(12),
     );
 
+    run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
+    pty.wait_for(b" Working | serve\x07");
+
+    // A shell already dead at Stop never enters the waiting state at all.
+    run_hook_with_tasks_root(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t2work","type":"shell","status":"running","description":"long task","command":"sleep 45"}]}"#,
+        &tasks_root,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07");
+
     // A server that binds only after the turn ends: released by the re-probe.
     let late = ChildGuard(
         Command::new("python3")
