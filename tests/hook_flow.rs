@@ -280,9 +280,8 @@ fn serving_and_killed_shells_release_the_waiting_title() {
     let mut pty = Pty::open();
     let claude = sleeper();
 
-    // Two real background-shell stand-ins, each holding its task output file
-    // open the way Claude Code's spawns do: a TCP listener (a "dev server")
-    // and a plain sleeper (awaited work).
+    // Real processes holding their task output files open, the way Claude
+    // Code's background spawns do.
     let server = ChildGuard(
         Command::new("python3")
             .args([
@@ -312,8 +311,6 @@ fn serving_and_killed_shells_release_the_waiting_title() {
     run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
     pty.wait_for(b" Working | serve\x07");
 
-    // The listener's process tree holds a listening socket, so it is a server
-    // and must not hold the title at waiting.
     run_hook_with_tasks_root(
         &pty.slave_path,
         claude.0.id(),
@@ -325,7 +322,6 @@ fn serving_and_killed_shells_release_the_waiting_title() {
     run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
     pty.wait_for(b" Working | serve\x07");
 
-    // The worker holds no socket: awaited work, so the title waits.
     run_hook_with_tasks_root(
         &pty.slave_path,
         claude.0.id(),
@@ -334,9 +330,7 @@ fn serving_and_killed_shells_release_the_waiting_title() {
     );
     pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | serve\x07");
 
-    // Killing it produces no wake, so the daemon's re-probe must notice that
-    // nothing holds the task's output file anymore and release the title on
-    // its own.
+    // A task-list kill fires no wake; the re-probe must release the title.
     worker.0.kill().unwrap();
     worker.0.wait().unwrap();
     pty.wait_for_within(
@@ -344,9 +338,7 @@ fn serving_and_killed_shells_release_the_waiting_title() {
         Duration::from_secs(12),
     );
 
-    // A server that binds its port only after the turn has ended: the hook
-    // sees plain awaited work, so the daemon's re-probe must spot the
-    // listener and release the title on its own.
+    // A server that binds only after the turn ends: released by the re-probe.
     let late = ChildGuard(
         Command::new("python3")
             .args([
@@ -399,8 +391,7 @@ fn sleeper() -> ChildGuard {
 }
 
 fn run_hook(tty: &Path, pid: u32, input: &str) {
-    // A root that exists but holds no task files, so probes settle on Unknown
-    // instead of reading real sessions' state.
+    // An empty root: probes settle on Unknown instead of reading real sessions.
     run_hook_with_tasks_root(tty, pid, input, Path::new("/var/empty"));
 }
 

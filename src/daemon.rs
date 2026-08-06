@@ -151,10 +151,8 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 }
             }
 
-            // While only shells hold the waiting title, keep probing them: one
-            // that starts serving after the turn ended, or that was killed
-            // without the wake a completion brings, would otherwise leave the
-            // title stuck until the next hook event.
+            // Re-probe pending shells: a server that binds late, or a shell
+            // killed without a wake, would otherwise stick until the next hook.
             if new_mode == StateKind::Pending
                 && !current.value.pending_beyond_shells
                 && !current.value.pending_shells.is_empty()

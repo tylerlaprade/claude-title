@@ -29,10 +29,8 @@ pub struct State {
     pub project: String,
     pub transcript_path: Option<PathBuf>,
     pub transcript_offset: u64,
-    // Meaningful only while kind is Pending: the session and task ids of
-    // background shells still counted as awaited work, and whether non-shell
-    // work also pends. The daemon re-probes the shells and drops Pending
-    // when none remain.
+    // Only meaningful while kind is Pending; the daemon re-probes these
+    // shells and drops Pending when none remain.
     #[serde(default)]
     pub pending_session: String,
     #[serde(default)]

@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub enum ShellProbe {
-    /// The task's process tree holds a listening TCP socket: it serves until
-    /// killed rather than running to completion, so it will never wake the
-    /// session on its own.
+    /// Holds a listening TCP socket: runs until killed, never wakes the session.
     Serving,
     Running,
     /// The task's output file exists but no process holds it open anymore.
@@ -271,8 +269,6 @@ mod tests {
                 .spawn()
                 .unwrap(),
         );
-        // This session's file has no holders, so the verdict is Gone even
-        // though another session's task with the same id is alive.
         let probed = probe_one(root.path(), "session", "shared1");
         drop(holder);
         assert!(matches!(probed, ShellProbe::Gone));
@@ -282,10 +278,9 @@ mod tests {
     fn listening_descendant_of_the_holder_is_serving() {
         let root = tempfile::tempdir().unwrap();
         let path = plant(root.path(), "nested1");
-        // The listener redirects both streams away, so only the sh wrapper
-        // holds the output file and the socket is reachable through the
-        // descendant walk alone. The trailing `:` keeps sh from replacing
-        // itself with the python process.
+        // Both streams redirected away: the sh wrapper alone holds the file,
+        // so the socket is reachable only through descent. The trailing `:`
+        // keeps sh from exec-replacing itself with python.
         let holder = ChildGuard(
             Command::new("sh")
                 .args([
