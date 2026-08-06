@@ -188,7 +188,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     let mut kept = Vec::new();
                     for (mut shell, verdict) in watch.shells.drain(..).zip(verdicts) {
                         match verdict {
-                            probe::ShellProbe::Serving => {}
+                            probe::ShellProbe::Endless => {}
                             probe::ShellProbe::Gone => {
                                 shell.misses += 1;
                                 if shell.misses < SHELL_GONE_MISSES {

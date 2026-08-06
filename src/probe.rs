@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub enum ShellProbe {
-    /// Holds a listening TCP socket: runs until killed, never wakes the session.
-    Serving,
+    /// Runs until killed — a listening socket, or nothing but shells and a
+    /// `tail` — so it will never wake the session.
+    Endless,
     Running,
     /// The task's output file exists but no process holds it open anymore.
     Gone,
@@ -35,7 +36,7 @@ fn tasks_under(root: &Path, session_id: &str, task_ids: &[String]) -> Vec<ShellP
         Done(ShellProbe),
         Tree(HashSet<u32>),
     }
-    let mut children = None;
+    let mut table = None;
     let partials: Vec<Partial> = task_ids
         .iter()
         .map(|task_id| {
@@ -63,9 +64,9 @@ fn tasks_under(root: &Path, session_id: &str, task_ids: &[String]) -> Vec<ShellP
                 return Partial::Done(ShellProbe::Gone);
             }
             let mut tree = holders.clone();
-            let children = children.get_or_insert_with(child_map);
+            let table = table.get_or_insert_with(ProcessTable::capture);
             for pid in holders {
-                descend(children, pid, &mut tree);
+                table.descend(pid, &mut tree);
             }
             Partial::Tree(tree)
         })
@@ -85,8 +86,9 @@ fn tasks_under(root: &Path, session_id: &str, task_ids: &[String]) -> Vec<ShellP
         .map(|partial| match partial {
             Partial::Done(verdict) => verdict,
             Partial::Tree(tree) => {
-                if tree.iter().any(|pid| listeners.contains(pid)) {
-                    ShellProbe::Serving
+                let listens = tree.iter().any(|pid| listeners.contains(pid));
+                if listens || table.as_ref().is_some_and(|table| table.bare_tail(&tree)) {
+                    ShellProbe::Endless
                 } else {
                     ShellProbe::Running
                 }
@@ -142,32 +144,69 @@ fn file_holders(path: &Path) -> Option<Vec<u32>> {
     )
 }
 
-fn child_map() -> HashMap<u32, Vec<u32>> {
-    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    let output = Command::new("ps").args(["-axo", "pid=,ppid="]).output();
-    if let Ok(output) = output {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let mut parts = line.split_whitespace();
-            let pid = parts.next().and_then(|value| value.parse::<u32>().ok());
-            let ppid = parts.next().and_then(|value| value.parse::<u32>().ok());
-            if let (Some(pid), Some(ppid)) = (pid, ppid) {
-                children.entry(ppid).or_default().push(pid);
-            }
-        }
-    }
-    children
+struct ProcessTable {
+    children: HashMap<u32, Vec<u32>>,
+    programs: HashMap<u32, String>,
 }
 
-fn descend(children: &HashMap<u32, Vec<u32>>, root: u32, into: &mut HashSet<u32>) {
-    let mut queue = vec![root];
-    while let Some(pid) = queue.pop() {
-        if let Some(direct) = children.get(&pid) {
-            for child in direct {
-                if into.insert(*child) {
-                    queue.push(*child);
+impl ProcessTable {
+    // `comm` is the executable, not the command line, so none of the quoting,
+    // escaping, or substring hazards that rule out command-text matching
+    // apply to it.
+    fn capture() -> Self {
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut programs = HashMap::new();
+        let output = Command::new("ps")
+            .args(["-axo", "pid=,ppid=,comm="])
+            .output();
+        if let Ok(output) = output {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut parts = line.split_whitespace();
+                let pid = parts.next().and_then(|value| value.parse::<u32>().ok());
+                let ppid = parts.next().and_then(|value| value.parse::<u32>().ok());
+                let (Some(pid), Some(ppid)) = (pid, ppid) else {
+                    continue;
+                };
+                children.entry(ppid).or_default().push(pid);
+                let comm = parts.collect::<Vec<_>>().join(" ");
+                let program = comm
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&comm)
+                    .trim_start_matches('-')
+                    .to_string();
+                programs.insert(pid, program);
+            }
+        }
+        Self { children, programs }
+    }
+
+    fn descend(&self, root: u32, into: &mut HashSet<u32>) {
+        let mut queue = vec![root];
+        while let Some(pid) = queue.pop() {
+            if let Some(direct) = self.children.get(&pid) {
+                for child in direct {
+                    if into.insert(*child) {
+                        queue.push(*child);
+                    }
                 }
             }
         }
+    }
+
+    // A bare log tail never exits, so it must not hold the waiting title. But
+    // `tail -f log | grep -m1 done` is awaited — the shell exits when grep
+    // matches — so the tree must hold nothing beyond shells and tails.
+    fn bare_tail(&self, tree: &HashSet<u32>) -> bool {
+        let mut saw_tail = false;
+        for pid in tree {
+            match self.programs.get(pid).map(String::as_str) {
+                Some("tail") => saw_tail = true,
+                Some("sh" | "bash" | "zsh" | "dash" | "fish" | "ksh") => {}
+                _ => return false,
+            }
+        }
+        saw_tail
     }
 }
 
@@ -275,7 +314,49 @@ mod tests {
     }
 
     #[test]
-    fn listening_descendant_of_the_holder_is_serving() {
+    fn bare_tail_is_endless() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("app.log");
+        File::create(&log).unwrap();
+        let path = plant(root.path(), "tailed1");
+        let holder = ChildGuard(
+            Command::new("tail")
+                .arg("-f")
+                .arg(&log)
+                .stdin(Stdio::null())
+                .stdout(File::create(&path).unwrap())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let probed = probe_one(root.path(), "session", "tailed1");
+        drop(holder);
+        assert!(matches!(probed, ShellProbe::Endless));
+    }
+
+    #[test]
+    fn tail_piped_into_a_matcher_is_awaited() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("app.log");
+        File::create(&log).unwrap();
+        let path = plant(root.path(), "tailwait1");
+        let holder = ChildGuard(
+            Command::new("sh")
+                .args(["-c", &format!("tail -f {} | grep -m1 zzz", log.display())])
+                .stdin(Stdio::null())
+                .stdout(File::create(&path).unwrap())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let probed = probe_one(root.path(), "session", "tailwait1");
+        drop(holder);
+        assert!(matches!(probed, ShellProbe::Running));
+    }
+
+    #[test]
+    fn listening_descendant_of_the_holder_is_endless() {
         let root = tempfile::tempdir().unwrap();
         let path = plant(root.path(), "nested1");
         // Both streams redirected away: the sh wrapper alone holds the file,
@@ -295,12 +376,12 @@ mod tests {
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut verdict = probe_one(root.path(), "session", "nested1");
-        while !matches!(verdict, ShellProbe::Serving) && std::time::Instant::now() < deadline {
+        while !matches!(verdict, ShellProbe::Endless) && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(100));
             verdict = probe_one(root.path(), "session", "nested1");
         }
         drop(holder);
-        assert!(matches!(verdict, ShellProbe::Serving));
+        assert!(matches!(verdict, ShellProbe::Endless));
     }
 
     #[test]

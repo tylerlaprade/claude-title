@@ -105,9 +105,9 @@ pub fn run() -> Result<()> {
 // teammate's registry entry stays "running" even while it idles, and a
 // "cloud session" can park on browser-side user input for the rest of the
 // session. Unrecognized kinds also fall through to Ready. Shells are probed
-// by task id: one that already serves a listening TCP socket runs until
-// killed — a dev server, a local stack — and never wakes the session, while
-// the rest are awaited work the daemon keeps re-probing during the pause.
+// by task id: one that runs until killed — a dev server holding a listening
+// socket, a bare log tail — never wakes the session, while the rest are
+// awaited work the daemon keeps re-probing during the pause.
 fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (bool, Vec<String>) {
     let mut beyond_shells = false;
     let mut shells = Vec::new();
@@ -125,7 +125,7 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
         shells = shells
             .into_iter()
             .zip(verdicts)
-            .filter(|(_, verdict)| !matches!(verdict, probe::ShellProbe::Serving))
+            .filter(|(_, verdict)| !matches!(verdict, probe::ShellProbe::Endless))
             .map(|(id, _)| id)
             .collect();
     }
