@@ -15,16 +15,19 @@ watches what actually runs and listens, so there is nothing to configure.
 ## Install
 
 ```sh
-cargo install claude-title
+brew install tylerlaprade/tap/claude-title
 claude-title install
 ```
+
+With a Rust toolchain, `cargo install claude-title` works instead, or
+`cargo install --path .` from a checkout. Prebuilt binaries are on the
+[releases page](https://github.com/tylerlaprade/claude-title/releases), each
+verifiable with `gh attestation verify`.
 
 Restart Claude Code afterward. The installer adds its hooks — pinned to the
 binary's install path, so rerun `claude-title install` if you move it — and
 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` to `~/.claude/settings.json`, touching
 nothing else.
-
-From a checkout, replace the first command with `cargo install --path .`.
 
 ## Uninstall
 
