@@ -7,7 +7,6 @@ exclude = ["AGENTS.md", "CLAUDE.md", ".hooks"]
 description = "Show Claude Code's live state in the terminal tab title."
 license = "GPL-3.0-only"
 repository = "https://github.com/tylerlaprade/claude-title"
-homepage = "https://github.com/tylerlaprade/claude-title"
 readme = "README.md"
 authors = ["Tyler Laprade <tyler@tylerlaprade.com>"]
 keywords = ["claude", "terminal", "title", "spinner", "hooks"]
