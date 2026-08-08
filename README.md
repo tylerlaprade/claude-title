@@ -1,6 +1,6 @@
 # claude-title
 
-Shows Claude Code's state in the terminal tab title:
+Show Claude Code's status in the terminal tab title:
 
 - `⠋ Working | project` while Claude works
 - `✳ Ready | project` when Claude finishes

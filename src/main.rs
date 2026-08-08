@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "claude-title")]
 #[command(version)]
-#[command(about = "Show Claude Code's live state in the terminal tab title")]
+#[command(about = "Show Claude Code's status in the terminal tab title")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
