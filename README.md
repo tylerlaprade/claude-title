@@ -14,7 +14,12 @@ hold the waiting title. No configuration.
 ## Install
 
 ```sh
-brew install tylerlaprade/tap/claude-title   # or: cargo install claude-title
+# macOS (recommended)
+brew install tylerlaprade/tap/claude-title
+
+# or
+cargo install claude-title
+
 claude-title install
 ```
 
@@ -28,7 +33,8 @@ attested binaries; verify with `gh attestation verify`.
 
 ```sh
 claude-title uninstall
-brew uninstall claude-title   # or: cargo uninstall claude-title
+brew uninstall claude-title   # if installed with Homebrew
+cargo uninstall claude-title  # if installed with Cargo
 ```
 
 Removes the hooks and restores the previous title setting.
