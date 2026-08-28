@@ -124,6 +124,15 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     let old_marker_output = pty.read_for(Duration::from_millis(650));
     assert!(!contains(&old_marker_output, b"\xe2\x9c\xb3 Ready"));
 
+    for tool in ["AskUserQuestion", "Read"] {
+        run_hook(
+            &pty.slave_path,
+            first_claude.0.id(),
+            &format!(
+                r#"{{"hook_event_name":"PreToolUse","cwd":"/tmp/example","tool_name":"{tool}"}}"#
+            ),
+        );
+    }
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
@@ -131,10 +140,19 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     );
     pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
 
+    // A tool running alongside the open dialog finishes without clearing it.
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
-        r#"{"hook_event_name":"PostToolUse","cwd":"/tmp/example"}"#,
+        r#"{"hook_event_name":"PostToolUse","cwd":"/tmp/example","tool_name":"Read"}"#,
+    );
+    let sibling_output = pty.read_for(Duration::from_millis(650));
+    assert!(!contains(&sibling_output, b" Working | example"));
+
+    run_hook(
+        &pty.slave_path,
+        first_claude.0.id(),
+        r#"{"hook_event_name":"PostToolUse","cwd":"/tmp/example","tool_name":"AskUserQuestion"}"#,
     );
     pty.wait_for(b" Working | example\x07");
 
@@ -161,7 +179,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
-        r#"{"hook_event_name":"Notification","cwd":"/tmp/example"}"#,
+        r#"{"hook_event_name":"Notification","cwd":"/tmp/example","message":"Claude needs your permission to use Bash"}"#,
     );
     pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
 

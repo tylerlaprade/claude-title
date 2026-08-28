@@ -29,6 +29,10 @@ pub struct State {
     pub project: String,
     pub transcript_path: Option<PathBuf>,
     pub transcript_offset: u64,
+    // Tools that started and have not reported completion. A dialog belongs to
+    // one of them, so the waiting title stands until the list empties.
+    #[serde(default)]
+    pub running_tools: Vec<String>,
     // Only meaningful while kind is Pending; the daemon re-probes these
     // shells and drops Pending when none remain.
     #[serde(default)]

@@ -17,6 +17,7 @@ struct HookInput {
     session_id: Option<String>,
     transcript_path: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    tool_name: Option<String>,
     #[serde(default)]
     background_tasks: Vec<BackgroundTask>,
 }
@@ -66,7 +67,29 @@ pub fn run() -> Result<()> {
     let previous = state::read(&paths.state)?
         .filter(|stored| stored.value.claude_pid == claude_pid)
         .map(|stored| stored.value);
-    let is_prompt = input.hook_event_name.as_deref() == Some("UserPromptSubmit");
+    let event = input.hook_event_name.as_deref().unwrap_or("");
+    let running_tools = running_tools(
+        event,
+        input.tool_name.as_deref().unwrap_or(""),
+        previous
+            .as_ref()
+            .map_or(&[][..], |value| &value.running_tools),
+    );
+    // The notification names no tool, so the dialog belongs to whichever tool
+    // is still in flight. A sibling finishing leaves the rest running and must
+    // not clear the title; the last one to finish is the one that resolved it.
+    // Anything else still clears it, so no missed completion can pin the title.
+    let kind = if matches!(event, "PostToolUse" | "PostToolUseFailure")
+        && !running_tools.is_empty()
+        && previous
+            .as_ref()
+            .is_some_and(|value| value.kind == StateKind::Waiting)
+    {
+        StateKind::Waiting
+    } else {
+        kind
+    };
+    let is_prompt = event == "UserPromptSubmit";
     let (transcript_path, transcript_offset) = if is_prompt {
         match input.transcript_path.filter(|path| path.is_file()) {
             Some(path) => {
@@ -87,6 +110,7 @@ pub fn run() -> Result<()> {
         project: project_name(input.cwd.as_deref()),
         transcript_path,
         transcript_offset,
+        running_tools,
         pending_session: session_id.to_string(),
         pending_shells,
         pending_beyond_shells,
@@ -139,6 +163,27 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
             .collect();
     }
     (beyond_shells, shells)
+}
+
+// A turn boundary settles every tool, so the list starts empty there rather
+// than carrying a tool that was interrupted before it could report.
+fn running_tools(event: &str, tool: &str, previous: &[String]) -> Vec<String> {
+    match event {
+        "PreToolUse" => {
+            let mut running = previous.to_vec();
+            running.push(tool.to_string());
+            running
+        }
+        "PostToolUse" | "PostToolUseFailure" => {
+            let mut running = previous.to_vec();
+            if let Some(finished) = running.iter().position(|running| running == tool) {
+                running.remove(finished);
+            }
+            running
+        }
+        "Notification" => previous.to_vec(),
+        _ => Vec::new(),
+    }
 }
 
 fn state_kind_for_event(event: &str) -> Option<StateKind> {
@@ -251,4 +296,50 @@ fn spawn_daemon(tty: &Path, state: &Path, lock: &Path, pid: u32) -> Result<()> {
     }
     command.spawn().context("failed to start title daemon")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn a_tool_runs_until_it_reports_completion() {
+        let started = running_tools("PreToolUse", "Bash", &[]);
+        assert_eq!(started, names(&["Bash"]));
+        assert!(running_tools("PostToolUse", "Bash", &started).is_empty());
+    }
+
+    #[test]
+    fn a_sibling_finishing_leaves_the_dialogs_tool_running() {
+        let running = names(&["Bash", "Read"]);
+        assert_eq!(
+            running_tools("PostToolUse", "Read", &running),
+            names(&["Bash"])
+        );
+    }
+
+    #[test]
+    fn repeated_tools_are_settled_one_at_a_time() {
+        let running = names(&["Bash", "Bash"]);
+        assert_eq!(
+            running_tools("PostToolUse", "Bash", &running),
+            names(&["Bash"])
+        );
+    }
+
+    #[test]
+    fn a_notification_leaves_the_running_tools_alone() {
+        let running = names(&["AskUserQuestion"]);
+        assert_eq!(running_tools("Notification", "", &running), running);
+    }
+
+    #[test]
+    fn a_turn_boundary_forgets_a_tool_that_never_reported() {
+        assert!(running_tools("UserPromptSubmit", "", &names(&["Bash"])).is_empty());
+        assert!(running_tools("Stop", "", &names(&["Bash"])).is_empty());
+    }
 }

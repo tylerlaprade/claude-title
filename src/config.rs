@@ -17,22 +17,18 @@ const OWN_COMMANDS: [&str; 7] = [
     "claude-title waiting",
     "claude-title end",
 ];
-// Completing one of the matched tools is what resolves its dialog; other tools
-// finishing must not clear the waiting state their sibling's open dialog set.
-// Matchers rely on Claude Code's exact-name list syntax; characters outside
-// [a-zA-Z0-9_|, -] silently switch matching to an unanchored regex.
+// Every tool reports both start and completion, because the hook tracks which
+// tools are still in flight to know when an open dialog was resolved; a name
+// list here could not tell a long tool that you already approved from one whose
+// dialog is still waiting. Matchers rely on Claude Code's exact-name list
+// syntax; characters outside [a-zA-Z0-9_|, -] silently switch matching to an
+// unanchored regex.
 const HOOKS: [(&str, Option<&str>); 9] = [
     ("SessionStart", Some("startup|resume|clear")),
     ("UserPromptSubmit", None),
     ("PreToolUse", None),
-    (
-        "PostToolUse",
-        Some("AskUserQuestion|EnterPlanMode|ExitPlanMode"),
-    ),
-    (
-        "PostToolUseFailure",
-        Some("AskUserQuestion|EnterPlanMode|ExitPlanMode"),
-    ),
+    ("PostToolUse", None),
+    ("PostToolUseFailure", None),
     ("Stop", None),
     ("StopFailure", None),
     ("Notification", Some("permission_prompt")),
