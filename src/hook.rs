@@ -75,6 +75,9 @@ pub fn run() -> Result<()> {
             .as_ref()
             .map_or(&[][..], |value| &value.running_tools),
     );
+    if is_stale_dialog(kind, previous.as_ref(), state::epoch()) {
+        return Ok(());
+    }
     // The notification names no tool, so the dialog belongs to whichever tool
     // is still in flight. A sibling finishing leaves the rest running and must
     // not clear the title; the last one to finish is the one that resolved it.
@@ -110,6 +113,8 @@ pub fn run() -> Result<()> {
         project: project_name(input.cwd.as_deref()),
         transcript_path,
         transcript_offset,
+        resolved_dialog: matches!(event, "PostToolUse" | "PostToolUseFailure")
+            && running_tools.is_empty(),
         running_tools,
         pending_session: session_id.to_string(),
         pending_shells,
@@ -163,6 +168,21 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
             .collect();
     }
     (beyond_shells, shells)
+}
+
+// Claude Code arms a dialog's notification on a timer. Answer the dialog just
+// as the timer fires and the notification reaches this hook after the tool has
+// already reported completion, which would pin Action required on a session
+// that has moved on. Only the beat right after that completion is refused, so
+// a dialog opening at any other moment, with or without a tool behind it, still
+// raises the title.
+const STALE_DIALOG_SECONDS: u64 = 2;
+
+fn is_stale_dialog(kind: StateKind, previous: Option<&State>, now: u64) -> bool {
+    kind == StateKind::Waiting
+        && previous.is_some_and(|previous| {
+            previous.resolved_dialog && now.saturating_sub(previous.epoch) <= STALE_DIALOG_SECONDS
+        })
 }
 
 // A turn boundary settles every tool, so the list starts empty there rather
@@ -335,6 +355,48 @@ mod tests {
     fn a_notification_leaves_the_running_tools_alone() {
         let running = names(&["AskUserQuestion"]);
         assert_eq!(running_tools("Notification", "", &running), running);
+    }
+
+    fn state(kind: StateKind, epoch: u64, running: &[&str]) -> State {
+        State {
+            kind,
+            epoch,
+            claude_pid: 1,
+            project: "example".to_string(),
+            transcript_path: None,
+            transcript_offset: 0,
+            running_tools: names(running),
+            resolved_dialog: running.is_empty(),
+            pending_session: String::new(),
+            pending_shells: Vec::new(),
+            pending_beyond_shells: false,
+        }
+    }
+
+    #[test]
+    fn a_dialog_announced_after_its_tool_finished_is_stale() {
+        let finished = state(StateKind::Busy, 100, &[]);
+        assert!(is_stale_dialog(StateKind::Waiting, Some(&finished), 101));
+    }
+
+    #[test]
+    fn a_dialog_belonging_to_a_running_tool_stands() {
+        let running = state(StateKind::Busy, 100, &["Bash"]);
+        assert!(!is_stale_dialog(StateKind::Waiting, Some(&running), 101));
+    }
+
+    #[test]
+    fn a_dialog_that_opens_later_stands_even_with_nothing_running() {
+        let finished = state(StateKind::Busy, 100, &[]);
+        assert!(!is_stale_dialog(StateKind::Waiting, Some(&finished), 130));
+    }
+
+    #[test]
+    fn a_dialog_that_opens_off_a_settled_session_stands() {
+        let mut prompted = state(StateKind::Busy, 100, &[]);
+        prompted.resolved_dialog = false;
+        assert!(!is_stale_dialog(StateKind::Waiting, Some(&prompted), 101));
+        assert!(!is_stale_dialog(StateKind::Waiting, None, 101));
     }
 
     #[test]

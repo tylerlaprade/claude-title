@@ -33,6 +33,10 @@ pub struct State {
     // one of them, so the waiting title stands until the list empties.
     #[serde(default)]
     pub running_tools: Vec<String>,
+    // Set by the completion that emptied that list: the moment an open dialog,
+    // if there was one, was resolved.
+    #[serde(default)]
+    pub resolved_dialog: bool,
     // Only meaningful while kind is Pending; the daemon re-probes these
     // shells and drops Pending when none remain.
     #[serde(default)]

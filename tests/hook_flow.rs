@@ -156,6 +156,19 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     );
     pty.wait_for(b" Working | example\x07");
 
+    // The dialog's notification can be a beat slower than the answer that
+    // closed it, and must not put the title back on a session that moved on.
+    run_hook(
+        &pty.slave_path,
+        first_claude.0.id(),
+        r#"{"hook_event_name":"Notification","cwd":"/tmp/example"}"#,
+    );
+    let late_notification_output = pty.read_for(Duration::from_millis(650));
+    assert!(!contains(
+        &late_notification_output,
+        b"\xe2\x9a\xa0 Action required"
+    ));
+
     append_records(&transcript, &[INTERRUPT_RECORD]);
     pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
