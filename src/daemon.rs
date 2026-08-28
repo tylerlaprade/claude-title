@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const INTERRUPT_MARKER: &[u8] =
     b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user";
+const USER_RECORD: &[u8] = b"\"type\":\"user\"";
 const SHELL_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
 // A shell that vanishes after finishing wakes the session within a beat, and
@@ -65,6 +66,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
     let mut transcript_path = None;
     let mut transcript_start = 0;
     let mut transcript_position = 0;
+    let mut transcript_interrupted = false;
     let mut last_scan = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let mut last_liveness_check = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let mut ended_dead_since = None;
@@ -82,6 +84,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 transcript_path.clone_from(&current.value.transcript_path);
                 transcript_start = current.value.transcript_offset;
                 transcript_position = transcript_start;
+                transcript_interrupted = false;
             }
             if mode != Some(new_mode) {
                 mode = Some(new_mode);
@@ -135,19 +138,25 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
             if matches!(new_mode, StateKind::Busy | StateKind::Waiting)
                 && now.duration_since(last_scan) >= Duration::from_millis(500)
             {
-                let (interrupted, position) = transcript_has_interrupt(
+                let was_interrupted = transcript_interrupted;
+                let (interrupted, position) = transcript_interrupt_state(
                     transcript_path.as_deref(),
                     transcript_start,
                     transcript_position,
+                    was_interrupted,
                 );
                 transcript_position = position;
+                transcript_interrupted = interrupted;
                 last_scan = now;
-                if interrupted && set_idle_if_unchanged(state_path, &current)? {
-                    mode = Some(StateKind::Idle);
-                    write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
-                    static_title = Some((StateKind::Idle, current.value.project.clone()));
-                } else if interrupted {
-                    transcript_position = transcript_start;
+                if interrupted && !was_interrupted {
+                    if set_idle_if_unchanged(state_path, &current)? {
+                        mode = Some(StateKind::Idle);
+                        write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
+                        static_title = Some((StateKind::Idle, current.value.project.clone()));
+                    } else {
+                        transcript_position = transcript_start;
+                        transcript_interrupted = false;
+                    }
                 }
             }
 
@@ -264,30 +273,50 @@ fn process_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-fn transcript_has_interrupt(path: Option<&Path>, start: u64, position: u64) -> (bool, u64) {
+// Pressing escape with a message queued submits that message before Claude
+// Code flushes the abandoned turn, so the interrupt record lands past the
+// offset the prompt hook recorded and would read as an interrupt of the new
+// turn. The interrupt only stands while it is the newest user record: the
+// prompt that follows it, or a later tool result, means the session moved on.
+fn transcript_interrupt_state(
+    path: Option<&Path>,
+    start: u64,
+    position: u64,
+    interrupted: bool,
+) -> (bool, u64) {
     let Some(path) = path else {
-        return (false, position);
+        return (interrupted, position);
     };
     let Ok(mut file) = File::open(path) else {
-        return (false, position);
+        return (interrupted, position);
     };
     let length = file.metadata().map_or(0, |metadata| metadata.len());
     let position = if position > length { start } else { position };
-    let scan_from = start.max(position.saturating_sub(INTERRUPT_MARKER.len() as u64));
-    if file.seek(SeekFrom::Start(scan_from)).is_err() {
-        return (false, position);
+    if file.seek(SeekFrom::Start(position)).is_err() {
+        return (interrupted, position);
     }
     let mut chunk = Vec::new();
     if file.read_to_end(&mut chunk).is_err() {
-        return (false, position);
+        return (interrupted, position);
     }
-    let end = scan_from + chunk.len() as u64;
-    (
-        chunk
-            .windows(INTERRUPT_MARKER.len())
-            .any(|window| window == INTERRUPT_MARKER),
-        end,
-    )
+    // A record is only readable once its newline lands; anything after the
+    // last one is a partial write to re-read on the next scan.
+    let Some(complete) = chunk.iter().rposition(|byte| *byte == b'\n') else {
+        return (interrupted, position);
+    };
+    let mut interrupted = interrupted;
+    for record in chunk[..complete].split(|byte| *byte == b'\n') {
+        if contains(record, USER_RECORD) {
+            interrupted = contains(record, INTERRUPT_MARKER);
+        }
+    }
+    (interrupted, position + complete as u64 + 1)
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 fn set_idle_if_unchanged(path: &Path, observed: &StoredState) -> Result<bool> {
@@ -336,17 +365,38 @@ mod tests {
         assert_eq!(clean_title("one\n\ttwo\u{7f} ✳"), "onetwo ✳");
     }
 
+    const INTERRUPT_RECORD: &[u8] = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+    const PROMPT_RECORD: &[u8] =
+        br#"{"type":"user","message":{"role":"user","content":"carry on"}}"#;
+    const ASSISTANT_RECORD: &[u8] =
+        br#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#;
+
+    fn append(path: &Path, records: &[&[u8]]) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        for record in records {
+            file.write_all(record).unwrap();
+            file.write_all(b"\n").unwrap();
+        }
+    }
+
     #[test]
-    fn interrupt_marker_can_cross_reads() {
+    fn interrupt_record_waits_for_its_newline() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("transcript.jsonl");
-        let prefix = b"{\"content\":[{\"type\":\"text\",\"text\":\"[Request";
-        fs::write(&path, prefix).unwrap();
-        let (_, first_position) = transcript_has_interrupt(Some(&path), 0, 0);
-        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(b" interrupted by user for tool use]\"}")
+        fs::write(&path, INTERRUPT_RECORD).unwrap();
+        let (found, position) = transcript_interrupt_state(Some(&path), 0, 0, false);
+        assert!(!found);
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\n")
             .unwrap();
-        let (found, _) = transcript_has_interrupt(Some(&path), 0, first_position);
+        let (found, _) = transcript_interrupt_state(Some(&path), 0, position, false);
         assert!(found);
     }
 
@@ -354,22 +404,32 @@ mod tests {
     fn scan_does_not_match_before_prompt_offset() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("transcript.jsonl");
-        fs::write(
-            &path,
-            b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user",
-        )
-        .unwrap();
+        append(&path, &[INTERRUPT_RECORD]);
         let offset = fs::metadata(&path).unwrap().len();
-        fs::write(
-            &path,
-            [
-                fs::read(&path).unwrap(),
-                b"\n{\"content\":[{\"type\":\"text\",\"text\":\"done\"}".to_vec(),
-            ]
-            .concat(),
-        )
-        .unwrap();
-        let (found, _) = transcript_has_interrupt(Some(&path), offset, offset);
+        append(&path, &[ASSISTANT_RECORD]);
+        let (found, _) = transcript_interrupt_state(Some(&path), offset, offset, false);
         assert!(!found);
+    }
+
+    #[test]
+    fn a_prompt_queued_behind_the_interrupt_resumes_working() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        append(&path, &[PROMPT_RECORD]);
+        let offset = fs::metadata(&path).unwrap().len();
+        append(&path, &[ASSISTANT_RECORD, INTERRUPT_RECORD, PROMPT_RECORD]);
+        let (found, _) = transcript_interrupt_state(Some(&path), offset, offset, false);
+        assert!(!found);
+    }
+
+    #[test]
+    fn an_interrupt_after_the_last_tool_result_stands() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        append(&path, &[PROMPT_RECORD]);
+        let offset = fs::metadata(&path).unwrap().len();
+        append(&path, &[ASSISTANT_RECORD, PROMPT_RECORD, INTERRUPT_RECORD]);
+        let (found, _) = transcript_interrupt_state(Some(&path), offset, offset, false);
+        assert!(found);
     }
 }

@@ -101,11 +101,7 @@ impl Pty {
 fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     let directory = tempfile::tempdir().unwrap();
     let transcript = directory.path().join("transcript.jsonl");
-    fs::write(
-        &transcript,
-        b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user",
-    )
-    .unwrap();
+    append_records(&transcript, &[INTERRUPT_RECORD]);
     let mut pty = Pty::open();
     let first_claude = sleeper();
 
@@ -142,10 +138,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     );
     pty.wait_for(b" Working | example\x07");
 
-    let mut transcript_file = OpenOptions::new().append(true).open(&transcript).unwrap();
-    transcript_file
-        .write_all(b"\n\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user")
-        .unwrap();
+    append_records(&transcript, &[INTERRUPT_RECORD]);
     pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
     run_hook(
@@ -158,6 +151,13 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     );
     pty.wait_for(b" Working | example\x07");
 
+    // Escape with a queued message flushes the abandoned turn after the prompt
+    // hook has read the transcript length, so the interrupt lands past the
+    // recorded offset and must not read as an interrupt of the new turn.
+    append_records(&transcript, &[INTERRUPT_RECORD, PROMPT_RECORD]);
+    let queued_prompt_output = pty.read_for(Duration::from_millis(650));
+    assert!(!contains(&queued_prompt_output, b"\xe2\x9c\xb3 Ready"));
+
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
@@ -165,10 +165,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     );
     pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
 
-    let mut transcript_file = OpenOptions::new().append(true).open(&transcript).unwrap();
-    transcript_file
-        .write_all(b"\n\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user")
-        .unwrap();
+    append_records(&transcript, &[INTERRUPT_RECORD]);
     pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
     run_hook(
@@ -452,6 +449,21 @@ fn tty_path(fd: RawFd) -> PathBuf {
         .map(|byte| byte as u8)
         .collect::<Vec<_>>();
     PathBuf::from(String::from_utf8(bytes).unwrap())
+}
+
+const INTERRUPT_RECORD: &[u8] = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+const PROMPT_RECORD: &[u8] = br#"{"type":"user","message":{"role":"user","content":"carry on"}}"#;
+
+fn append_records(path: &Path, records: &[&[u8]]) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    for record in records {
+        file.write_all(record).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
