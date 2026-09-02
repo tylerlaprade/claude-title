@@ -418,6 +418,59 @@ fn serving_and_killed_shells_release_the_waiting_title() {
     wait_for_daemon_exit(&pty.slave_path);
 }
 
+#[test]
+fn a_renamed_session_shows_its_name_in_place_of_the_project() {
+    let directory = tempfile::tempdir().unwrap();
+    let transcript = directory.path().join("transcript.jsonl");
+    append_records(
+        &transcript,
+        &[br#"{"type":"custom-title","customTitle":"Smart-Title"}"#],
+    );
+    let mut pty = Pty::open();
+    let claude = sleeper();
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/nulspace-io","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | Smart-Title\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/nulspace-io"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | Smart-Title\x07");
+
+    // A later rename lands on the same session.
+    append_records(
+        &transcript,
+        &[br#"{"type":"custom-title","customTitle":"Renamed-Again"}"#],
+    );
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/nulspace-io","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | Renamed-Again\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/nulspace-io"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
 fn sleeper() -> ChildGuard {
     ChildGuard(
         Command::new("sleep")

@@ -1,5 +1,5 @@
 use crate::probe;
-use crate::state::{self, StateKind, StoredState};
+use crate::state::{self, State, StateKind, StoredState};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
@@ -93,41 +93,36 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 }
             }
 
+            let label = title_label(&current.value);
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    write_title(
-                        tty,
-                        &format!("{} Working | {}", FRAMES[frame], current.value.project),
-                    )?;
+                    write_title(tty, &format!("{} Working | {}", FRAMES[frame], label))?;
                     frame = (frame + 1) % FRAMES.len();
                 }
                 StateKind::Idle | StateKind::Unknown => {
-                    let title = (new_mode, current.value.project.clone());
+                    let title = (new_mode, label.to_string());
                     if static_title.as_ref() != Some(&title) {
-                        write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
+                        write_title(tty, &format!("✳ Ready | {label}"))?;
                         static_title = Some(title);
                     }
                 }
                 StateKind::Pending => {
-                    let title = (StateKind::Pending, current.value.project.clone());
+                    let title = (StateKind::Pending, label.to_string());
                     if static_title.as_ref() != Some(&title) {
-                        write_title(tty, &format!("⧗ Waiting | {}", current.value.project))?;
+                        write_title(tty, &format!("⧗ Waiting | {label}"))?;
                         static_title = Some(title);
                     }
                 }
                 StateKind::Waiting => {
-                    let title = (StateKind::Waiting, current.value.project.clone());
+                    let title = (StateKind::Waiting, label.to_string());
                     if static_title.as_ref() != Some(&title) {
-                        write_title(
-                            tty,
-                            &format!("⚠ Action required | {}", current.value.project),
-                        )?;
+                        write_title(tty, &format!("⚠ Action required | {label}"))?;
                         static_title = Some(title);
                     }
                 }
                 StateKind::End => {
-                    let title = (StateKind::End, current.value.project.clone());
+                    let title = (StateKind::End, label.to_string());
                     if static_title.as_ref() != Some(&title) {
                         write_title(tty, "")?;
                         static_title = Some(title);
@@ -150,9 +145,10 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 last_scan = now;
                 if interrupted && !was_interrupted {
                     if set_idle_if_unchanged(state_path, &current)? {
+                        let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
-                        static_title = Some((StateKind::Idle, current.value.project.clone()));
+                        write_title(tty, &format!("✳ Ready | {label}"))?;
+                        static_title = Some((StateKind::Idle, label.to_string()));
                     } else {
                         transcript_position = transcript_start;
                         transcript_interrupted = false;
@@ -212,9 +208,10 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     }
                     watch.shells = kept;
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
+                        let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        write_title(tty, &format!("✳ Ready | {}", current.value.project))?;
-                        static_title = Some((StateKind::Idle, current.value.project.clone()));
+                        write_title(tty, &format!("✳ Ready | {label}"))?;
+                        static_title = Some((StateKind::Idle, label.to_string()));
                     }
                 }
             } else {
@@ -249,6 +246,16 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
         thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+// Many tabs in one project all read the same project name; when the user has
+// run /rename in the Claude Code CLI, that name is what distinguishes them.
+fn title_label(state: &State) -> &str {
+    state
+        .custom_title
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&state.project)
 }
 
 fn clean_title(value: &str) -> String {

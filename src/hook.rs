@@ -93,11 +93,12 @@ pub fn run() -> Result<()> {
         kind
     };
     let is_prompt = event == "UserPromptSubmit";
+    let input_transcript = input.transcript_path.filter(|path| path.is_file());
     let (transcript_path, transcript_offset) = if is_prompt {
-        match input.transcript_path.filter(|path| path.is_file()) {
+        match input_transcript.as_deref() {
             Some(path) => {
-                let offset = fs::metadata(&path).map_or(0, |metadata| metadata.len());
-                (Some(path), offset)
+                let offset = fs::metadata(path).map_or(0, |metadata| metadata.len());
+                (Some(path.to_path_buf()), offset)
             }
             None => (None, 0),
         }
@@ -106,11 +107,16 @@ pub fn run() -> Result<()> {
             (value.transcript_path, value.transcript_offset)
         })
     };
+    let custom_title = transcript_path
+        .as_deref()
+        .or(input_transcript.as_deref())
+        .and_then(latest_custom_title);
     let value = State {
         kind,
         epoch: state::epoch(),
         claude_pid,
         project: project_name(input.cwd.as_deref()),
+        custom_title,
         transcript_path,
         transcript_offset,
         resolved_dialog: matches!(event, "PostToolUse" | "PostToolUseFailure")
@@ -204,6 +210,34 @@ fn running_tools(event: &str, tool: &str, previous: &[String]) -> Vec<String> {
         "Notification" => previous.to_vec(),
         _ => Vec::new(),
     }
+}
+
+// The Claude Code CLI writes {"type":"custom-title","customTitle":"..."} into
+// the session's JSONL transcript whenever the user runs /rename, and re-writes
+// it on session resume, so the latest such record is what the title should
+// reflect. Scanning the file is cheap enough at hook cadence; the substring
+// pre-filter keeps unrelated turn records from being parsed.
+fn latest_custom_title(path: &Path) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Record {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "customTitle")]
+        title: Option<String>,
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    let mut latest = None;
+    for line in contents.lines() {
+        if !line.contains(r#""type":"custom-title""#) {
+            continue;
+        }
+        if let Ok(record) = serde_json::from_str::<Record>(line)
+            && record.kind == "custom-title"
+        {
+            latest = record.title;
+        }
+    }
+    latest.filter(|value| !value.is_empty())
 }
 
 fn state_kind_for_event(event: &str) -> Option<StateKind> {
@@ -363,6 +397,7 @@ mod tests {
             epoch,
             claude_pid: 1,
             project: "example".to_string(),
+            custom_title: None,
             transcript_path: None,
             transcript_offset: 0,
             running_tools: names(running),
@@ -403,5 +438,46 @@ mod tests {
     fn a_turn_boundary_forgets_a_tool_that_never_reported() {
         assert!(running_tools("UserPromptSubmit", "", &names(&["Bash"])).is_empty());
         assert!(running_tools("Stop", "", &names(&["Bash"])).is_empty());
+    }
+
+    #[test]
+    fn latest_rename_is_what_the_title_reflects() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+                r#"{"type":"custom-title","customTitle":"First"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#,
+                "\n",
+                r#"{"type":"custom-title","customTitle":"Smart-Title"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(latest_custom_title(&path).as_deref(), Some("Smart-Title"));
+    }
+
+    #[test]
+    fn a_transcript_with_no_rename_leaves_the_title_alone() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#,
+        )
+        .unwrap();
+        assert!(latest_custom_title(&path).is_none());
+    }
+
+    #[test]
+    fn a_partly_written_transcript_does_not_panic() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        fs::write(&path, r#"{"type":"custom-title","customTitle":"pending"#).unwrap();
+        assert!(latest_custom_title(&path).is_none());
     }
 }

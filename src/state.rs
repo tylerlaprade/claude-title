@@ -27,6 +27,10 @@ pub struct State {
     pub epoch: u64,
     pub claude_pid: u32,
     pub project: String,
+    // Set by /rename in the Claude Code CLI; when present the daemon shows
+    // this in the title so many tabs in one project stay distinguishable.
+    #[serde(default)]
+    pub custom_title: Option<String>,
     pub transcript_path: Option<PathBuf>,
     pub transcript_offset: u64,
     // Tools that started and have not reported completion. A dialog belongs to
