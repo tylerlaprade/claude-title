@@ -471,6 +471,62 @@ fn a_renamed_session_shows_its_name_in_place_of_the_project() {
     wait_for_daemon_exit(&pty.slave_path);
 }
 
+#[test]
+fn a_daemon_steps_aside_when_the_binary_is_replaced() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let binary = directory.path().join("claude-title");
+    fs::copy(env!("CARGO_BIN_EXE_claude-title"), &binary).unwrap();
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut pty = Pty::open();
+    let claude = sleeper();
+
+    let mut child = Command::new(&binary)
+        .arg("hook")
+        .env("CLAUDE_CODE_ENTRYPOINT", "cli")
+        .env("CLAUDE_TITLE_TASKS_ROOT", "/var/empty")
+        .env("CLAUDE_TITLE_TTY", &pty.slave_path)
+        .env("CLAUDE_TITLE_PID", claude.0.id().to_string())
+        .env("CLAUDE_PROJECT_DIR", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"hook_event_name":"SessionStart","cwd":"/tmp/upgrade"}"#)
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | upgrade\x07");
+
+    let paths = state::paths_for_tty(&pty.slave_path).unwrap();
+    assert!(paths.lock.exists());
+
+    // A cargo install writes a new file and renames it into place, giving the
+    // replacement a fresh inode. Reproduce that here.
+    let replacement = directory.path().join("claude-title.next");
+    fs::copy(env!("CARGO_BIN_EXE_claude-title"), &replacement).unwrap();
+    fs::set_permissions(&replacement, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(&replacement, &binary).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while Instant::now() < deadline && paths.lock.exists() {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !paths.lock.exists(),
+        "daemon did not step aside after the binary was replaced"
+    );
+
+    let _ = fs::remove_file(&paths.state);
+    drop(claude);
+}
+
 fn sleeper() -> ChildGuard {
     ChildGuard(
         Command::new("sleep")

@@ -2,9 +2,10 @@ use crate::probe;
 use crate::state::{self, State, StateKind, StoredState};
 use anyhow::{Context, Result};
 use fs2::FileExt;
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -71,6 +72,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
     let mut last_liveness_check = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
     let mut ended_dead_since = None;
     let mut shell_watch: Option<ShellWatch> = None;
+    let executable_at_start = executable_signature();
 
     loop {
         let now = Instant::now();
@@ -220,6 +222,12 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
         }
 
         if now.duration_since(last_liveness_check) >= Duration::from_secs(1) {
+            // An upgrade replaces the binary at env::current_exe(), giving it
+            // a fresh inode; step aside so the next hook fire spawns the new
+            // one instead of leaving the tab pinned to old code.
+            if executable_at_start.is_some() && executable_signature() != executable_at_start {
+                break;
+            }
             if process_alive(monitor_pid) {
                 ended_dead_since = None;
             } else if mode == Some(StateKind::End) {
@@ -268,6 +276,12 @@ fn clean_title(value: &str) -> String {
 fn write_title(tty: &mut File, title: &str) -> Result<()> {
     tty.write_all(format!("\u{1b}]0;{}\u{7}", clean_title(title)).as_bytes())
         .context("failed to write terminal title")
+}
+
+fn executable_signature() -> Option<(u64, u64)> {
+    let path = env::current_exe().ok()?;
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
 }
 
 fn process_alive(pid: u32) -> bool {
