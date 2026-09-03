@@ -110,7 +110,7 @@ pub fn run() -> Result<()> {
     let custom_title = transcript_path
         .as_deref()
         .or(input_transcript.as_deref())
-        .and_then(latest_custom_title);
+        .and_then(latest_session_title);
     let value = State {
         kind,
         epoch: state::epoch(),
@@ -212,32 +212,49 @@ fn running_tools(event: &str, tool: &str, previous: &[String]) -> Vec<String> {
     }
 }
 
-// The Claude Code CLI writes {"type":"custom-title","customTitle":"..."} into
-// the session's JSONL transcript whenever the user runs /rename, and re-writes
-// it on session resume, so the latest such record is what the title should
-// reflect. Scanning the file is cheap enough at hook cadence; the substring
-// pre-filter keeps unrelated turn records from being parsed.
-fn latest_custom_title(path: &Path) -> Option<String> {
+// Claude Code writes two record types into the JSONL transcript that can name
+// the session:
+//
+//   {"type":"custom-title","customTitle":"..."}   from /rename
+//   {"type":"agent-setting","agentSetting":"..."} from `claude --name ...` or
+//                                                 the /name command
+//
+// Both re-appear on resume and the CLI re-emits agent-setting each turn, so
+// scanning to the end of the file gets the latest of each. A user who runs
+// /rename after a CLI-assigned name wants the /rename to win even though
+// agent-setting keeps firing, so custom-title takes precedence when present.
+// Scanning the file is cheap enough at hook cadence; the substring pre-filter
+// keeps unrelated turn records from being parsed.
+fn latest_session_title(path: &Path) -> Option<String> {
     #[derive(Deserialize)]
     struct Record {
         #[serde(rename = "type")]
         kind: String,
         #[serde(rename = "customTitle")]
-        title: Option<String>,
+        custom_title: Option<String>,
+        #[serde(rename = "agentSetting")]
+        agent_setting: Option<String>,
     }
     let contents = fs::read_to_string(path).ok()?;
-    let mut latest = None;
+    let mut latest_custom = None;
+    let mut latest_agent = None;
     for line in contents.lines() {
-        if !line.contains(r#""type":"custom-title""#) {
+        if !line.contains(r#""type":"custom-title""#) && !line.contains(r#""type":"agent-setting""#)
+        {
             continue;
         }
-        if let Ok(record) = serde_json::from_str::<Record>(line)
-            && record.kind == "custom-title"
-        {
-            latest = record.title;
+        let Ok(record) = serde_json::from_str::<Record>(line) else {
+            continue;
+        };
+        match record.kind.as_str() {
+            "custom-title" => latest_custom = record.custom_title,
+            "agent-setting" => latest_agent = record.agent_setting,
+            _ => {}
         }
     }
-    latest.filter(|value| !value.is_empty())
+    latest_custom
+        .or(latest_agent)
+        .filter(|value| !value.is_empty())
 }
 
 fn state_kind_for_event(event: &str) -> Option<StateKind> {
@@ -458,7 +475,45 @@ mod tests {
             ),
         )
         .unwrap();
-        assert_eq!(latest_custom_title(&path).as_deref(), Some("Smart-Title"));
+        assert_eq!(latest_session_title(&path).as_deref(), Some("Smart-Title"));
+    }
+
+    #[test]
+    fn a_cli_assigned_name_reaches_the_title() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"agent-setting","agentSetting":"tyler-1","sessionId":"s"}"#,
+                "\n",
+                r#"{"type":"user","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+                r#"{"type":"agent-setting","agentSetting":"tyler-1","sessionId":"s"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(latest_session_title(&path).as_deref(), Some("tyler-1"));
+    }
+
+    #[test]
+    fn a_rename_wins_over_a_cli_assigned_name_it_follows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("transcript.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                r#"{"type":"agent-setting","agentSetting":"tyler-1","sessionId":"s"}"#,
+                "\n",
+                r#"{"type":"custom-title","customTitle":"chosen","sessionId":"s"}"#,
+                "\n",
+                r#"{"type":"agent-setting","agentSetting":"tyler-1","sessionId":"s"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(latest_session_title(&path).as_deref(), Some("chosen"));
     }
 
     #[test]
@@ -470,7 +525,7 @@ mod tests {
             r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#,
         )
         .unwrap();
-        assert!(latest_custom_title(&path).is_none());
+        assert!(latest_session_title(&path).is_none());
     }
 
     #[test]
@@ -478,6 +533,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("transcript.jsonl");
         fs::write(&path, r#"{"type":"custom-title","customTitle":"pending"#).unwrap();
-        assert!(latest_custom_title(&path).is_none());
+        assert!(latest_session_title(&path).is_none());
     }
 }

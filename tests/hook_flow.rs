@@ -472,6 +472,37 @@ fn a_renamed_session_shows_its_name_in_place_of_the_project() {
 }
 
 #[test]
+fn a_cli_assigned_session_name_shows_in_place_of_the_project() {
+    let directory = tempfile::tempdir().unwrap();
+    let transcript = directory.path().join("transcript.jsonl");
+    append_records(
+        &transcript,
+        &[br#"{"type":"agent-setting","agentSetting":"tyler-1","sessionId":"s"}"#],
+    );
+    let mut pty = Pty::open();
+    let claude = sleeper();
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/nulspace-io","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | tyler-1\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/nulspace-io"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
+#[test]
 fn a_daemon_steps_aside_when_the_binary_is_replaced() {
     use std::os::unix::fs::PermissionsExt;
 
