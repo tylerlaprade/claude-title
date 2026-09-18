@@ -2,8 +2,11 @@ use claude_title::state;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -72,6 +75,19 @@ impl Pty {
                 }
                 Err(error) => panic!("failed to read pseudo-terminal: {error}"),
             }
+        }
+        output
+    }
+
+    fn read_slowly_for(&mut self, duration: Duration) -> Vec<u8> {
+        let deadline = Instant::now() + duration;
+        let mut output = Vec::new();
+        while Instant::now() < deadline {
+            let mut buffer = [0; 128];
+            if let Ok(count) = self.master.read(&mut buffer) {
+                output.extend_from_slice(&buffer[..count]);
+            }
+            thread::sleep(Duration::from_millis(1));
         }
         output
     }
@@ -648,4 +664,84 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
         .windows(needle.len())
         .filter(|window| *window == needle)
         .count()
+}
+
+// Claude Code sends each frame as one blocking write; the kernel parks that
+// write at the pty's high-water mark, and a title written meanwhile lands
+// inside the frame. The frame here is nothing but 19-byte color sequences, so
+// any title that lands mid-write splits one and the terminal prints its tail.
+#[test]
+fn a_title_never_lands_inside_another_writers_escape_sequence() {
+    const COLOR: &[u8] = b"\x1b[38;2;78;186;101m";
+    let directory = tempfile::tempdir().unwrap();
+    let transcript = directory.path().join("transcript.jsonl");
+    fs::write(&transcript, b"start\n").unwrap();
+    let mut pty = Pty::open();
+    let claude = sleeper();
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/frames","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | frames\x07");
+
+    let mut slave = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOCTTY)
+        .open(&pty.slave_path)
+        .unwrap();
+    let flooding = Arc::new(AtomicBool::new(true));
+    let writer = thread::spawn({
+        let flooding = Arc::clone(&flooding);
+        let frame = COLOR.repeat(2048);
+        move || {
+            while flooding.load(Ordering::Relaxed) {
+                slave.write_all(&frame).unwrap();
+            }
+        }
+    });
+    let mut output = pty.read_slowly_for(Duration::from_millis(1500));
+    flooding.store(false, Ordering::Relaxed);
+    output.extend(pty.read_for(Duration::from_millis(300)));
+    writer.join().unwrap();
+    output.extend(pty.read_for(Duration::from_millis(100)));
+
+    let title_starts: Vec<usize> = output
+        .windows(4)
+        .enumerate()
+        .filter(|(_, window)| *window == b"\x1b]0;")
+        .map(|(index, _)| index)
+        .collect();
+    let split_titles: Vec<String> = title_starts
+        .iter()
+        .filter(|&&index| index > 0 && !matches!(output[index - 1], b'm' | b'\x07'))
+        .map(|&index| {
+            String::from_utf8_lossy(
+                &output[index.saturating_sub(24)..(index + 24).min(output.len())],
+            )
+            .into_owned()
+        })
+        .collect();
+    assert!(
+        count(&output, COLOR) >= 2048,
+        "the flood never reached the terminal"
+    );
+    assert!(
+        split_titles.is_empty(),
+        "titles landed inside escape sequences: {split_titles:?}"
+    );
+
+    pty.wait_for(b" Working | frames\x07");
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/frames"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
 }

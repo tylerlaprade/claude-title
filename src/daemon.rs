@@ -5,6 +5,7 @@ use fs2::FileExt;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::thread;
@@ -15,6 +16,10 @@ const INTERRUPT_MARKER: &[u8] =
     b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user";
 const USER_RECORD: &[u8] = b"\"type\":\"user\"";
 const SHELL_PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const OUTPUT_SETTLE_READS: u8 = 3;
+const OUTPUT_SETTLE_GAP: Duration = Duration::from_millis(1);
+const OUTPUT_SETTLE_PATIENCE: Duration = Duration::from_millis(50);
+const EXIT_CLEAR_PATIENCE: Duration = Duration::from_secs(2);
 
 // A shell that vanishes after finishing wakes the session within a beat, and
 // that wake rewrites the state before two probes pass. Two consecutive misses
@@ -99,34 +104,37 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    write_title(tty, &format!("{} Working | {}", FRAMES[frame], label))?;
-                    frame = (frame + 1) % FRAMES.len();
+                    if write_title(tty, &format!("{} Working | {}", FRAMES[frame], label))? {
+                        frame = (frame + 1) % FRAMES.len();
+                    }
                 }
                 StateKind::Idle | StateKind::Unknown => {
                     let title = (new_mode, label.to_string());
-                    if static_title.as_ref() != Some(&title) {
-                        write_title(tty, &format!("✳ Ready | {label}"))?;
+                    if static_title.as_ref() != Some(&title)
+                        && write_title(tty, &format!("✳ Ready | {label}"))?
+                    {
                         static_title = Some(title);
                     }
                 }
                 StateKind::Pending => {
                     let title = (StateKind::Pending, label.to_string());
-                    if static_title.as_ref() != Some(&title) {
-                        write_title(tty, &format!("⧗ Waiting | {label}"))?;
+                    if static_title.as_ref() != Some(&title)
+                        && write_title(tty, &format!("⧗ Waiting | {label}"))?
+                    {
                         static_title = Some(title);
                     }
                 }
                 StateKind::Waiting => {
                     let title = (StateKind::Waiting, label.to_string());
-                    if static_title.as_ref() != Some(&title) {
-                        write_title(tty, &format!("⚠ Action required | {label}"))?;
+                    if static_title.as_ref() != Some(&title)
+                        && write_title(tty, &format!("⚠ Action required | {label}"))?
+                    {
                         static_title = Some(title);
                     }
                 }
                 StateKind::End => {
                     let title = (StateKind::End, label.to_string());
-                    if static_title.as_ref() != Some(&title) {
-                        write_title(tty, "")?;
+                    if static_title.as_ref() != Some(&title) && write_title(tty, "")? {
                         static_title = Some(title);
                     }
                 }
@@ -149,8 +157,9 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     if set_idle_if_unchanged(state_path, &current)? {
                         let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        write_title(tty, &format!("✳ Ready | {label}"))?;
-                        static_title = Some((StateKind::Idle, label.to_string()));
+                        if write_title(tty, &format!("✳ Ready | {label}"))? {
+                            static_title = Some((StateKind::Idle, label.to_string()));
+                        }
                     } else {
                         transcript_position = transcript_start;
                         transcript_interrupted = false;
@@ -212,8 +221,9 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
                         let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        write_title(tty, &format!("✳ Ready | {label}"))?;
-                        static_title = Some((StateKind::Idle, label.to_string()));
+                        if write_title(tty, &format!("✳ Ready | {label}"))? {
+                            static_title = Some((StateKind::Idle, label.to_string()));
+                        }
                     }
                 }
             } else {
@@ -245,7 +255,10 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     }
                 }
             } else {
-                write_title(tty, "")?;
+                let deadline = Instant::now() + EXIT_CLEAR_PATIENCE;
+                while !write_title(tty, "")? && Instant::now() < deadline {
+                    thread::sleep(OUTPUT_SETTLE_PATIENCE);
+                }
                 break;
             }
             last_liveness_check = now;
@@ -273,9 +286,46 @@ fn clean_title(value: &str) -> String {
         .collect()
 }
 
-fn write_title(tty: &mut File, title: &str) -> Result<()> {
+fn queued_output(tty: &File) -> Option<libc::c_int> {
+    let mut queued: libc::c_int = 0;
+    let result = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCOUTQ, &raw mut queued) };
+    (result == 0).then_some(queued)
+}
+
+// Claude Code sends each frame as one blocking write, and the kernel parks
+// that write whenever the pty's output queue passes its high-water mark. A
+// title written meanwhile lands inside the frame, and when it lands inside an
+// escape sequence the terminal drops the sequence and prints its tail as text.
+// A parked write refills the queue within microseconds of it draining, so a
+// queue that stays empty across a few reads has no write in flight.
+fn output_settled(tty: &File) -> bool {
+    let deadline = Instant::now() + OUTPUT_SETTLE_PATIENCE;
+    let mut empty_reads = 0;
+    loop {
+        match queued_output(tty) {
+            None => return true,
+            Some(0) => {
+                empty_reads += 1;
+                if empty_reads == OUTPUT_SETTLE_READS {
+                    return true;
+                }
+            }
+            Some(_) => empty_reads = 0,
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(OUTPUT_SETTLE_GAP);
+    }
+}
+
+fn write_title(tty: &mut File, title: &str) -> Result<bool> {
+    if !output_settled(tty) {
+        return Ok(false);
+    }
     tty.write_all(format!("\u{1b}]0;{}\u{7}", clean_title(title)).as_bytes())
-        .context("failed to write terminal title")
+        .context("failed to write terminal title")?;
+    Ok(true)
 }
 
 fn executable_signature() -> Option<(u64, u64)> {
