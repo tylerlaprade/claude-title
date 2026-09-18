@@ -747,3 +747,305 @@ fn a_title_never_lands_inside_another_writers_escape_sequence() {
     drop(claude);
     wait_for_daemon_exit(&pty.slave_path);
 }
+
+struct XorShift(u64);
+
+impl XorShift {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound as u64) as usize
+    }
+
+    fn between(&mut self, low: usize, high: usize) -> usize {
+        low + self.below(high - low)
+    }
+}
+
+const GLYPHS: [&str; 8] = ["▓", "▒", "░", "✳", "⠋", "⠙", "漢", "字"];
+
+// One burst of what a terminal app writes: text, wide glyphs, colors, cursor
+// motion, hyperlinks, and its own tab titles, in a random order and size.
+fn app_burst(rng: &mut XorShift, buffer: &mut Vec<u8>) {
+    let target = rng.between(200, 40_000);
+    while buffer.len() < target {
+        match rng.below(12) {
+            0..=3 => {
+                for _ in 0..rng.between(1, 40) {
+                    buffer.push(b" abcdefghijklmnopqrstuvwxyz0123456789"[rng.below(37)]);
+                }
+            }
+            4 | 5 => buffer.extend_from_slice(GLYPHS[rng.below(GLYPHS.len())].as_bytes()),
+            6 => {
+                let color = format!(
+                    "\x1b[38;2;{};{};{}m",
+                    rng.below(256),
+                    rng.below(256),
+                    rng.below(256)
+                );
+                buffer.extend_from_slice(color.as_bytes());
+            }
+            7 => buffer.extend_from_slice(b"\x1b[0m"),
+            8 => {
+                let motion: &[&[u8]] = &[
+                    b"\x1b[3A",
+                    b"\x1b[K",
+                    b"\x1b[2J",
+                    b"\x1b[?25l",
+                    b"\x1b[?25h",
+                    b"\x1b[1;5H",
+                    b"\x1b[999;999H",
+                ];
+                buffer.extend_from_slice(motion[rng.below(motion.len())]);
+            }
+            9 => {
+                let terminator: &[u8] = if rng.below(2) == 0 {
+                    b"\x07"
+                } else {
+                    b"\x1b\\"
+                };
+                let link = format!("\x1b]8;;https://example.com/{}", rng.below(1000));
+                buffer.extend_from_slice(link.as_bytes());
+                buffer.extend_from_slice(terminator);
+                buffer.extend_from_slice(b"link");
+                buffer.extend_from_slice(b"\x1b]8;;");
+                buffer.extend_from_slice(terminator);
+            }
+            _ => {
+                let title = format!("\x1b]0;app frame {}\x07", rng.below(1000));
+                buffer.extend_from_slice(title.as_bytes());
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum VtState {
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+// Walks the byte stream the way a terminal would and reports every place a
+// sequence or a multi-byte character was cut short by something else.
+fn sequence_breaks(output: &[u8]) -> Vec<String> {
+    let mut breaks = Vec::new();
+    let mut state = VtState::Ground;
+    let mut utf8_pending = 0;
+    let mut osc_start = 0;
+    let mut osc_contents: Vec<Vec<u8>> = Vec::new();
+    for (index, &byte) in output.iter().enumerate() {
+        let context = || {
+            String::from_utf8_lossy(
+                &output[index.saturating_sub(32)..(index + 32).min(output.len())],
+            )
+            .into_owned()
+        };
+        if utf8_pending > 0 {
+            if (0x80..=0xBF).contains(&byte) {
+                utf8_pending -= 1;
+                continue;
+            }
+            breaks.push(format!("character cut at {index}: {:?}", context()));
+            utf8_pending = 0;
+        }
+        match state {
+            VtState::Ground => match byte {
+                0x1b => state = VtState::Escape,
+                0xC0..=0xDF => utf8_pending = 1,
+                0xE0..=0xEF => utf8_pending = 2,
+                0xF0..=0xF7 => utf8_pending = 3,
+                _ => {}
+            },
+            VtState::Escape => match byte {
+                b'[' => state = VtState::Csi,
+                b']' => {
+                    state = VtState::Osc;
+                    osc_start = index + 1;
+                }
+                0x1b => breaks.push(format!("escape cut at {index}: {:?}", context())),
+                _ => state = VtState::Ground,
+            },
+            VtState::Csi => match byte {
+                0x40..=0x7E => state = VtState::Ground,
+                0x1b => {
+                    breaks.push(format!("CSI cut at {index}: {:?}", context()));
+                    state = VtState::Escape;
+                }
+                _ => {}
+            },
+            VtState::Osc => match byte {
+                0x07 => {
+                    osc_contents.push(output[osc_start..index].to_vec());
+                    state = VtState::Ground;
+                }
+                0x1b => state = VtState::OscEscape,
+                _ => {}
+            },
+            VtState::OscEscape => {
+                if byte == b'\\' {
+                    osc_contents.push(output[osc_start..index - 1].to_vec());
+                    state = VtState::Ground;
+                } else {
+                    breaks.push(format!("OSC cut at {index}: {:?}", context()));
+                    state = if byte == b'[' {
+                        VtState::Csi
+                    } else {
+                        VtState::Escape
+                    };
+                }
+            }
+        }
+    }
+    for content in osc_contents {
+        let text = String::from_utf8_lossy(&content).into_owned();
+        let title = text.strip_prefix("0;");
+        let daemon_title = title.is_some_and(|title| {
+            title.is_empty()
+                || title.ends_with(" | fuzz")
+                    && (title.starts_with("✳ Ready")
+                        || title.starts_with("⧗ Waiting")
+                        || title.starts_with("⚠ Action required")
+                        || FRAMES.iter().any(|frame| title.starts_with(frame)))
+        });
+        let app_sequence =
+            title.is_some_and(|title| title.starts_with("app frame ")) || text.starts_with("8;;");
+        if !daemon_title && !app_sequence {
+            breaks.push(format!("unexpected sequence contents: {text:?}"));
+        }
+    }
+    breaks
+}
+
+const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+// Any content, any drain rate, every daemon state: no title may land inside
+// another writer's sequence or character, and no app bytes may land inside a
+// title. The judge is a terminal parser over what the terminal received.
+#[test]
+fn a_title_never_interrupts_any_terminal_sequence() {
+    let directory = tempfile::tempdir().unwrap();
+    let transcript = directory.path().join("transcript.jsonl");
+    fs::write(&transcript, b"start\n").unwrap();
+    let mut pty = Pty::open();
+    let claude = sleeper();
+    let prompt = format!(
+        r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/fuzz","transcript_path":{}}}"#,
+        serde_json::to_string(&transcript).unwrap()
+    );
+    let dialog = r#"{"hook_event_name":"Notification","cwd":"/tmp/fuzz","message":"Claude needs your permission to use Bash"}"#;
+    let shell_left_running = r#"{"hook_event_name":"Stop","cwd":"/tmp/fuzz","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"sleep","command":"sleep 5"}]}"#;
+
+    run_hook(&pty.slave_path, claude.0.id(), &prompt);
+    pty.wait_for(b" Working | fuzz\x07");
+
+    let mut output = Vec::new();
+    for seed in [
+        0x9E37_79B9_7F4A_7C15_u64,
+        0xD1B5_4A32_D192_ED03,
+        0x2545_F491_4F6C_DD1D,
+    ] {
+        let mut slave = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(&pty.slave_path)
+            .unwrap();
+        let flooding = Arc::new(AtomicBool::new(true));
+        let writer = thread::spawn({
+            let flooding = Arc::clone(&flooding);
+            move || {
+                let mut rng = XorShift(seed);
+                let mut burst = Vec::new();
+                while flooding.load(Ordering::Relaxed) {
+                    burst.clear();
+                    app_burst(&mut rng, &mut burst);
+                    slave.write_all(&burst).unwrap();
+                    thread::sleep(Duration::from_millis(rng.between(5, 40) as u64));
+                }
+            }
+        });
+        let seed_start = output.len();
+        output.extend(pty.read_slowly_for(Duration::from_millis(150)));
+        run_hook(&pty.slave_path, claude.0.id(), dialog);
+        output.extend(pty.read_for(Duration::from_millis(150)));
+        run_hook(&pty.slave_path, claude.0.id(), shell_left_running);
+        output.extend(pty.read_slowly_for(Duration::from_millis(150)));
+        run_hook(&pty.slave_path, claude.0.id(), &prompt);
+        output.extend(pty.read_for(Duration::from_millis(150)));
+        // A loaded machine drains and settles more slowly; keep the flood
+        // going until this seed has seen real interleaving, within a bound.
+        let deadline = Instant::now() + Duration::from_millis(2500);
+        let mut slow = true;
+        while Instant::now() < deadline
+            && (output.len() - seed_start < 50_000
+                || count(&output[seed_start..], b" | fuzz\x07") < 2)
+        {
+            output.extend(if slow {
+                pty.read_slowly_for(Duration::from_millis(100))
+            } else {
+                pty.read_for(Duration::from_millis(100))
+            });
+            slow = !slow;
+        }
+        flooding.store(false, Ordering::Relaxed);
+        while !writer.is_finished() {
+            output.extend(pty.read_for(Duration::from_millis(50)));
+        }
+        writer.join().unwrap();
+    }
+    output.extend(pty.read_for(Duration::from_millis(100)));
+
+    let breaks = sequence_breaks(&output);
+    assert!(
+        breaks.is_empty(),
+        "terminal stream was corrupted: {breaks:#?}"
+    );
+    assert!(
+        output.len() >= 150_000,
+        "the flood only delivered {} bytes",
+        output.len()
+    );
+    assert!(count(&output, b"\x1b]0;app frame ") >= 20);
+    assert!(count(&output, b"\x1b]8;;") >= 20);
+    let daemon_titles = count(&output, b" | fuzz\x07");
+    assert!(
+        daemon_titles >= 6,
+        "only {daemon_titles} daemon titles landed during the flood"
+    );
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/fuzz"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07");
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/fuzz"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
+#[test]
+fn the_parser_flags_titles_that_cut_sequences_and_characters() {
+    let inside_color = b"\x1b[38;2;7\x1b]0;\xe2\xa0\xb8 Working | fuzz\x078;186;101m";
+    assert_eq!(sequence_breaks(inside_color).len(), 1);
+    let inside_glyph = b"\xe2\x96\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07\x93";
+    assert_eq!(sequence_breaks(inside_glyph).len(), 1);
+    let inside_link = b"\x1b]8;;https://a\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07\x07";
+    assert_eq!(sequence_breaks(inside_link).len(), 1);
+    let clean = b"\x1b[38;2;7;8;9m\xe2\x96\x93\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07\x1b]8;;x\x1b\\y\x1b]0;app frame 1\x07";
+    assert!(sequence_breaks(clean).is_empty());
+}
