@@ -706,7 +706,9 @@ fn a_title_never_lands_inside_another_writers_escape_sequence() {
     });
     let mut output = pty.read_slowly_for(Duration::from_millis(1500));
     flooding.store(false, Ordering::Relaxed);
-    output.extend(pty.read_for(Duration::from_millis(300)));
+    while !writer.is_finished() {
+        output.extend(pty.read_for(Duration::from_millis(50)));
+    }
     writer.join().unwrap();
     output.extend(pty.read_for(Duration::from_millis(100)));
 
