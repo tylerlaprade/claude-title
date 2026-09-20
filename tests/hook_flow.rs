@@ -532,6 +532,7 @@ fn a_daemon_steps_aside_when_the_binary_is_replaced() {
 
     let mut child = Command::new(&binary)
         .arg("hook")
+        .env_remove("TERM_PROGRAM")
         .env("CLAUDE_CODE_ENTRYPOINT", "cli")
         .env("CLAUDE_TITLE_TASKS_ROOT", "/var/empty")
         .env("CLAUDE_TITLE_TTY", &pty.slave_path)
@@ -594,6 +595,7 @@ fn run_hook(tty: &Path, pid: u32, input: &str) {
 fn run_hook_with_tasks_root(tty: &Path, pid: u32, input: &str, tasks_root: &Path) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_claude-title"))
         .arg("hook")
+        .env_remove("TERM_PROGRAM")
         .env("CLAUDE_CODE_ENTRYPOINT", "cli")
         .env("CLAUDE_TITLE_TASKS_ROOT", tasks_root)
         .env("CLAUDE_TITLE_TTY", tty)

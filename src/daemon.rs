@@ -1,11 +1,11 @@
 use crate::probe;
 use crate::state::{self, State, StateKind, StoredState};
+use crate::title::TerminalTitle;
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::thread;
@@ -16,8 +16,6 @@ const INTERRUPT_MARKER: &[u8] =
     b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user";
 const USER_RECORD: &[u8] = b"\"type\":\"user\"";
 const SHELL_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-const OUTPUT_SETTLE_READS: u8 = 3;
-const OUTPUT_SETTLE_GAP: Duration = Duration::from_millis(1);
 const OUTPUT_SETTLE_PATIENCE: Duration = Duration::from_millis(50);
 const EXIT_CLEAR_PATIENCE: Duration = Duration::from_secs(2);
 
@@ -54,17 +52,13 @@ pub fn run(tty_path: &Path, state_path: &Path, lock_path: &Path, initial_pid: u3
     lock.write_all(format!("{}\n", std::process::id()).as_bytes())?;
     lock.flush()?;
 
-    let result = OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NOCTTY)
-        .open(tty_path)
-        .with_context(|| format!("failed to open {}", tty_path.display()))
+    let result = TerminalTitle::open(tty_path)
         .and_then(|mut tty| run_loop(&mut tty, state_path, initial_pid));
     remove_own_lock(&mut lock, lock_path);
     result
 }
 
-fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
+fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Result<()> {
     let mut mode = None;
     let mut static_title: Option<(StateKind, String)> = None;
     let mut frame = 0;
@@ -104,14 +98,14 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    if write_title(tty, &format!("{} Working | {}", FRAMES[frame], label))? {
+                    if tty.write(&format!("{} Working | {}", FRAMES[frame], label))? {
                         frame = (frame + 1) % FRAMES.len();
                     }
                 }
                 StateKind::Idle | StateKind::Unknown => {
                     let title = (new_mode, label.to_string());
                     if static_title.as_ref() != Some(&title)
-                        && write_title(tty, &format!("✳ Ready | {label}"))?
+                        && tty.write(&format!("✳ Ready | {label}"))?
                     {
                         static_title = Some(title);
                     }
@@ -119,7 +113,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 StateKind::Pending => {
                     let title = (StateKind::Pending, label.to_string());
                     if static_title.as_ref() != Some(&title)
-                        && write_title(tty, &format!("⧗ Waiting | {label}"))?
+                        && tty.write(&format!("⧗ Waiting | {label}"))?
                     {
                         static_title = Some(title);
                     }
@@ -127,14 +121,14 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 StateKind::Waiting => {
                     let title = (StateKind::Waiting, label.to_string());
                     if static_title.as_ref() != Some(&title)
-                        && write_title(tty, &format!("⚠ Action required | {label}"))?
+                        && tty.write(&format!("⚠ Action required | {label}"))?
                     {
                         static_title = Some(title);
                     }
                 }
                 StateKind::End => {
                     let title = (StateKind::End, label.to_string());
-                    if static_title.as_ref() != Some(&title) && write_title(tty, "")? {
+                    if static_title.as_ref() != Some(&title) && tty.write("")? {
                         static_title = Some(title);
                     }
                 }
@@ -157,7 +151,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     if set_idle_if_unchanged(state_path, &current)? {
                         let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        if write_title(tty, &format!("✳ Ready | {label}"))? {
+                        if tty.write(&format!("✳ Ready | {label}"))? {
                             static_title = Some((StateKind::Idle, label.to_string()));
                         }
                     } else {
@@ -221,7 +215,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
                         let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        if write_title(tty, &format!("✳ Ready | {label}"))? {
+                        if tty.write(&format!("✳ Ready | {label}"))? {
                             static_title = Some((StateKind::Idle, label.to_string()));
                         }
                     }
@@ -256,7 +250,7 @@ fn run_loop(tty: &mut File, state_path: &Path, initial_pid: u32) -> Result<()> {
                 }
             } else {
                 let deadline = Instant::now() + EXIT_CLEAR_PATIENCE;
-                while !write_title(tty, "")? && Instant::now() < deadline {
+                while !tty.write("")? && Instant::now() < deadline {
                     thread::sleep(OUTPUT_SETTLE_PATIENCE);
                 }
                 break;
@@ -277,55 +271,6 @@ fn title_label(state: &State) -> &str {
         .as_deref()
         .filter(|value| !value.is_empty())
         .unwrap_or(&state.project)
-}
-
-fn clean_title(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| *character >= ' ' && *character != '\u{7f}')
-        .collect()
-}
-
-fn queued_output(tty: &File) -> Option<libc::c_int> {
-    let mut queued: libc::c_int = 0;
-    let result = unsafe { libc::ioctl(tty.as_raw_fd(), libc::TIOCOUTQ, &raw mut queued) };
-    (result == 0).then_some(queued)
-}
-
-// Claude Code sends each frame as one blocking write, and the kernel parks
-// that write whenever the pty's output queue passes its high-water mark. A
-// title written meanwhile lands inside the frame, and when it lands inside an
-// escape sequence the terminal drops the sequence and prints its tail as text.
-// A parked write refills the queue within microseconds of it draining, so a
-// queue that stays empty across a few reads has no write in flight.
-fn output_settled(tty: &File) -> bool {
-    let deadline = Instant::now() + OUTPUT_SETTLE_PATIENCE;
-    let mut empty_reads = 0;
-    loop {
-        match queued_output(tty) {
-            None => return true,
-            Some(0) => {
-                empty_reads += 1;
-                if empty_reads == OUTPUT_SETTLE_READS {
-                    return true;
-                }
-            }
-            Some(_) => empty_reads = 0,
-        }
-        if Instant::now() >= deadline {
-            return false;
-        }
-        thread::sleep(OUTPUT_SETTLE_GAP);
-    }
-}
-
-fn write_title(tty: &mut File, title: &str) -> Result<bool> {
-    if !output_settled(tty) {
-        return Ok(false);
-    }
-    tty.write_all(format!("\u{1b}]0;{}\u{7}", clean_title(title)).as_bytes())
-        .context("failed to write terminal title")?;
-    Ok(true)
 }
 
 fn executable_signature() -> Option<(u64, u64)> {
@@ -430,11 +375,6 @@ fn remove_own_lock(lock: &mut File, path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn title_removes_control_characters() {
-        assert_eq!(clean_title("one\n\ttwo\u{7f} ✳"), "onetwo ✳");
-    }
 
     const INTERRUPT_RECORD: &[u8] = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
     const PROMPT_RECORD: &[u8] =

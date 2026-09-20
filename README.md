@@ -41,8 +41,11 @@ Removes the hooks and restores the previous title setting.
 
 ## Support
 
-macOS and Linux terminals with OSC 0 title support; tested on macOS with
-Ghostty. Shell probing needs `lsof` (preinstalled on macOS). A
+macOS Ghostty 1.3.1 or later uses its native AppleScript API so title updates
+cannot split terminal output. AppleScript support must be enabled in Ghostty;
+macOS may request Automation access on first use. Other terminals use OSC 0
+with a best-effort output queue check. Shell probing needs `lsof` (preinstalled
+on macOS). A
 `docker compose up` stack listens outside the shell's process tree, so it
 holds the waiting title.
 
