@@ -159,7 +159,7 @@ mod ghostty {
         #[test]
         fn native_titles_preserve_unicode_and_treat_titles_as_data() {
             let script = mock_script(
-                r#"({
+                r"({
                     terminals: {
                         whose: query => () => query.tty === '/dev/test' ? [{id: () => 'surface'}] : [],
                         byId: id => id
@@ -167,7 +167,7 @@ mod ghostty {
                     performAction: (action, target) => {
                         return target.on === 'surface' && action === 'set_surface_title:' + expected.shift();
                     }
-                })"#,
+                })",
             );
             let script = format!(
                 "const expected = ['⠋ Working | 漢字', '✳ Ready | \"quoted\" \\\\ path', ''];\n{script}"
