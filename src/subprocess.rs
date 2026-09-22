@@ -103,7 +103,7 @@ mod tests {
     fn output_larger_than_a_pipe_buffer_does_not_deadlock() {
         let output = output(Command::new("head").args(["-c", "262144", "/dev/zero"])).unwrap();
         assert!(output.status.success());
-        assert_eq!(output.stdout.len(), 262144);
+        assert_eq!(output.stdout.len(), 262_144);
     }
 
     #[test]

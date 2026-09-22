@@ -17,8 +17,24 @@ pub(crate) enum TerminalTitle {
     Ghostty(ghostty::Connection),
 }
 
+#[derive(Debug)]
+pub(crate) struct TerminalDetached;
+
+impl std::fmt::Display for TerminalDetached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("session no longer belongs to a Ghostty process")
+    }
+}
+
+impl std::error::Error for TerminalDetached {}
+
 impl TerminalTitle {
-    pub(crate) fn open(tty: &Path) -> Result<Self> {
+    pub(crate) fn open(tty: &Path, owner: u32) -> Result<Self> {
+        if std::env::var("TERM_PROGRAM").as_deref() == Ok("ghostty")
+            && !crate::probe::belongs_to_terminal(owner, "ghostty")?
+        {
+            return Err(TerminalDetached.into());
+        }
         #[cfg(target_os = "macos")]
         if std::env::var("TERM_PROGRAM").as_deref() == Ok("ghostty") {
             return ghostty::Connection::open(tty).map(Self::Ghostty);
@@ -252,7 +268,7 @@ mod ghostty {
                     .unwrap(),
             );
             let script = SCRIPT.to_string()
-                + r#"
+                + r"
 this.run = argv => {
     try {
         const pid = Number(argv[0]);
@@ -263,7 +279,7 @@ this.run = argv => {
         reply(true);
     } catch (error) { reply(String(error)); }
 };
-"#;
+";
             let pid = ghostty.0.id().to_string();
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut connection = loop {

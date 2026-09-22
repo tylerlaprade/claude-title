@@ -53,7 +53,11 @@ holds the waiting title.
 Hooks serialize state changes per terminal; background subagent hooks do not
 overwrite the main session's title. Transcript name lookup reads only appended
 records after the first scan. Process probes and Ghostty replies have bounded
-waits, so an unresponsive helper cannot hold a title daemon indefinitely.
+waits. The daemon retries a failed connection while its owning session remains
+alive, so restoring a session does not require another prompt to initialize its
+title. Detached workers with an inherited Ghostty environment do not open title
+connections. Startup and transport errors are retained beside the per-terminal
+state in the temporary `claude-title-<uid>` directory as `<tty>.log`.
 
 ## License
 

@@ -65,8 +65,10 @@ fn tasks_under(root: &Path, session_id: &str, task_ids: &[String]) -> Vec<ShellP
             }
             let mut tree = holders.clone();
             let table = table.get_or_insert_with(ProcessTable::capture);
-            for pid in holders {
-                table.descend(pid, &mut tree);
+            if let Ok(table) = table {
+                for pid in holders {
+                    table.descend(pid, &mut tree);
+                }
             }
             Partial::Tree(tree)
         })
@@ -87,7 +89,12 @@ fn tasks_under(root: &Path, session_id: &str, task_ids: &[String]) -> Vec<ShellP
             Partial::Done(verdict) => verdict,
             Partial::Tree(tree) => {
                 let listens = tree.iter().any(|pid| listeners.contains(pid));
-                if listens || table.as_ref().is_some_and(|table| table.bare_tail(&tree)) {
+                if listens
+                    || table
+                        .as_ref()
+                        .and_then(|table| table.as_ref().ok())
+                        .is_some_and(|table| table.bare_tail(&tree))
+                {
                     ShellProbe::Endless
                 } else {
                     ShellProbe::Running
@@ -145,6 +152,7 @@ fn file_holders(path: &Path) -> Option<Vec<u32>> {
 }
 
 struct ProcessTable {
+    parents: HashMap<u32, u32>,
     children: HashMap<u32, Vec<u32>>,
     programs: HashMap<u32, String>,
 }
@@ -153,31 +161,40 @@ impl ProcessTable {
     // `comm` is the executable, not the command line, so none of the quoting,
     // escaping, or substring hazards that rule out command-text matching
     // apply to it.
-    fn capture() -> Self {
+    fn capture() -> anyhow::Result<Self> {
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut parents = HashMap::new();
         let mut programs = HashMap::new();
         let output =
-            crate::subprocess::output(Command::new("/bin/ps").args(["-axo", "pid=,ppid=,comm="]));
-        if let Ok(output) = output {
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let mut parts = line.split_whitespace();
-                let pid = parts.next().and_then(|value| value.parse::<u32>().ok());
-                let ppid = parts.next().and_then(|value| value.parse::<u32>().ok());
-                let (Some(pid), Some(ppid)) = (pid, ppid) else {
-                    continue;
-                };
-                children.entry(ppid).or_default().push(pid);
-                let comm = parts.collect::<Vec<_>>().join(" ");
-                let program = comm
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&comm)
-                    .trim_start_matches('-')
-                    .to_string();
-                programs.insert(pid, program);
-            }
+            crate::subprocess::output(Command::new("/bin/ps").args(["-axo", "pid=,ppid=,comm="]))?;
+        anyhow::ensure!(
+            output.status.success(),
+            "process snapshot failed: {}",
+            output.status
+        );
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut parts = line.split_whitespace();
+            let pid = parts.next().and_then(|value| value.parse::<u32>().ok());
+            let ppid = parts.next().and_then(|value| value.parse::<u32>().ok());
+            let (Some(pid), Some(ppid)) = (pid, ppid) else {
+                continue;
+            };
+            children.entry(ppid).or_default().push(pid);
+            parents.insert(pid, ppid);
+            let comm = parts.collect::<Vec<_>>().join(" ");
+            let program = comm
+                .rsplit('/')
+                .next()
+                .unwrap_or(&comm)
+                .trim_start_matches('-')
+                .to_string();
+            programs.insert(pid, program);
         }
-        Self { children, programs }
+        Ok(Self {
+            parents,
+            children,
+            programs,
+        })
     }
 
     fn descend(&self, root: u32, into: &mut HashSet<u32>) {
@@ -207,6 +224,27 @@ impl ProcessTable {
         }
         saw_tail
     }
+}
+
+pub(crate) fn belongs_to_terminal(mut pid: u32, terminal: &str) -> anyhow::Result<bool> {
+    let table = ProcessTable::capture()?;
+    for _ in 0..=table.parents.len() {
+        if table
+            .programs
+            .get(&pid)
+            .is_some_and(|program| program == terminal)
+        {
+            return Ok(true);
+        }
+        if pid <= 1 {
+            return Ok(false);
+        }
+        pid = *table
+            .parents
+            .get(&pid)
+            .ok_or_else(|| anyhow::anyhow!("session process disappeared during terminal lookup"))?;
+    }
+    anyhow::bail!("process ancestry contains a cycle");
 }
 
 fn listening_pids(pids: &HashSet<u32>) -> HashSet<u32> {

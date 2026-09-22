@@ -659,7 +659,7 @@ fn concurrent_tool_hooks_preserve_every_in_flight_tool() {
                     tty,
                     pid,
                     &format!(r#"{{"hook_event_name":"PreToolUse","tool_name":"tool-{index}"}}"#),
-                )
+                );
             });
         }
     });

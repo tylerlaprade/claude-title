@@ -52,10 +52,43 @@ pub fn run(tty_path: &Path, state_path: &Path, lock_path: &Path, initial_pid: u3
     lock.write_all(format!("{}\n", std::process::id()).as_bytes())?;
     lock.flush()?;
 
-    let result = TerminalTitle::open(tty_path)
-        .and_then(|mut tty| run_loop(&mut tty, state_path, initial_pid));
+    let result = supervise_title(state_path, initial_pid, Duration::from_secs(1), |owner| {
+        TerminalTitle::open(tty_path, owner)
+            .and_then(|mut tty| run_loop(&mut tty, state_path, owner))
+    });
     lock.set_len(0)?;
     result
+}
+
+fn supervise_title(
+    state_path: &Path,
+    initial_pid: u32,
+    retry_delay: Duration,
+    mut attempt: impl FnMut(u32) -> Result<()>,
+) -> Result<()> {
+    let mut last_error = None;
+    loop {
+        let owner =
+            state::read(state_path)?.map_or(initial_pid, |current| current.value.claude_pid);
+        if !process_alive(owner) {
+            return Ok(());
+        }
+        match attempt(owner) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is::<crate::title::TerminalDetached>() => return Err(error),
+            Err(error) => {
+                let message = format!("{error:#}");
+                if last_error.as_ref() != Some(&message) {
+                    eprintln!(
+                        "claude-title: {}: {message}; retrying while session {owner} is alive",
+                        state::epoch()
+                    );
+                    last_error = Some(message);
+                }
+            }
+        }
+        thread::sleep(retry_delay);
+    }
 }
 
 fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Result<()> {
@@ -368,6 +401,40 @@ fn open_lock(path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_startup_recovers_without_another_hook() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut attempts = 0;
+        supervise_title(
+            &directory.path().join("state.json"),
+            std::process::id(),
+            Duration::ZERO,
+            |_| {
+                attempts += 1;
+                if attempts < 3 {
+                    anyhow::bail!("terminal is still starting");
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn title_retries_stop_when_the_session_is_gone() {
+        let directory = tempfile::tempdir().unwrap();
+        supervise_title(
+            &directory.path().join("state.json"),
+            0,
+            Duration::ZERO,
+            |_| {
+                panic!("a dead session must not open a title connection");
+            },
+        )
+        .unwrap();
+    }
 
     const INTERRUPT_RECORD: &[u8] = br#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
     const PROMPT_RECORD: &[u8] =

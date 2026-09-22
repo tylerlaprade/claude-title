@@ -317,6 +317,11 @@ fn open_lock(path: &Path) -> Result<File> {
 }
 
 fn spawn_daemon(tty: &Path, state: &Path, lock: &Path, pid: u32) -> Result<()> {
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(state.with_extension("log"))?;
     let mut command = Command::new(env::current_exe()?);
     command
         .arg("daemon")
@@ -330,7 +335,7 @@ fn spawn_daemon(tty: &Path, state: &Path, lock: &Path, pid: u32) -> Result<()> {
         .arg(pid.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(log));
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
