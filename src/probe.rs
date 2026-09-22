@@ -132,10 +132,10 @@ fn task_outputs(root: &Path, session_id: &str, task_id: &str) -> Vec<PathBuf> {
 
 fn file_holders(path: &Path) -> Option<Vec<u32>> {
     let path = path.to_str()?;
-    let output = Command::new("lsof")
-        .args(["-t", "--", path])
-        .output()
-        .ok()?;
+    let output = crate::subprocess::output(Command::new("lsof").args(["-t", "--", path])).ok()?;
+    if !output.status.success() && (output.status.code() != Some(1) || !output.stderr.is_empty()) {
+        return None;
+    }
     Some(
         String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -156,9 +156,8 @@ impl ProcessTable {
     fn capture() -> Self {
         let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut programs = HashMap::new();
-        let output = Command::new("/bin/ps")
-            .args(["-axo", "pid=,ppid=,comm="])
-            .output();
+        let output =
+            crate::subprocess::output(Command::new("/bin/ps").args(["-axo", "pid=,ppid=,comm="]));
         if let Ok(output) = output {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 let mut parts = line.split_whitespace();
@@ -219,9 +218,15 @@ fn listening_pids(pids: &HashSet<u32>) -> HashSet<u32> {
         .map(u32::to_string)
         .collect::<Vec<_>>()
         .join(",");
-    let output = Command::new("lsof")
-        .args(["-t", "-a", "-nP", "-iTCP", "-sTCP:LISTEN", "-p", &list])
-        .output();
+    let output = crate::subprocess::output(Command::new("lsof").args([
+        "-t",
+        "-a",
+        "-nP",
+        "-iTCP",
+        "-sTCP:LISTEN",
+        "-p",
+        &list,
+    ]));
     let Ok(output) = output else {
         return HashSet::new();
     };

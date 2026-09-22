@@ -43,11 +43,17 @@ Removes the hooks and restores the previous title setting.
 
 macOS Ghostty 1.3.1 or later uses its native AppleScript API so title updates
 cannot split terminal output. AppleScript support must be enabled in Ghostty;
-macOS may request Automation access on first use. Other terminals use OSC 0
-with a best-effort output queue check. Shell probing needs `lsof` (preinstalled
-on macOS). A
+macOS may request Automation access on first use. Title updates target an
+existing Ghostty process and never reopen the app after you quit it. Other
+terminals use OSC 0 with a best-effort output queue check. Shell probing needs
+`lsof` (preinstalled on macOS). A
 `docker compose up` stack listens outside the shell's process tree, so it
 holds the waiting title.
+
+Hooks serialize state changes per terminal; background subagent hooks do not
+overwrite the main session's title. Transcript name lookup reads only appended
+records after the first scan. Process probes and Ghostty replies have bounded
+waits, so an unresponsive helper cannot hold a title daemon indefinitely.
 
 ## License
 

@@ -339,8 +339,8 @@ fn is_own_command(command: &str) -> bool {
     let Some(program) = command.strip_suffix(" hook") else {
         return false;
     };
-    let program = program.trim_matches('"');
-    Path::new(program).file_name() == Some(std::ffi::OsStr::new("claude-title"))
+    let program = program.trim_matches(['"', '\'']).replace("'\\''", "'");
+    Path::new(&program).file_name() == Some(std::ffi::OsStr::new("claude-title"))
 }
 
 // Hooks run with whatever PATH Claude Code inherits, so record the absolute
@@ -357,15 +357,17 @@ fn hook_command() -> String {
     let Some(path) = exe.to_str() else {
         return COMMAND.to_string();
     };
+    command_for_path(path)
+}
+
+fn command_for_path(path: &str) -> String {
     if path
         .chars()
         .all(|character| character.is_ascii_alphanumeric() || "/_.-".contains(character))
     {
         format!("{path} hook")
-    } else if !path.contains('"') {
-        format!("\"{path}\" hook")
     } else {
-        COMMAND.to_string()
+        format!("'{}' hook", path.replace('\'', "'\\''"))
     }
 }
 
@@ -405,6 +407,23 @@ fn object_mut<'a>(value: &'a mut Value, name: &str) -> Result<&'a mut Map<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hook_paths_are_literal_shell_arguments() {
+        let path = "/odd $(printf bad) `printf bad` ' path/claude-title";
+        let command = command_for_path(path);
+        assert!(is_own_command(&command));
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("set -- {command}; printf '%s\\n' \"$1\" \"$2\""))
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{path}\nhook\n")
+        );
+    }
     use std::os::unix::fs::{PermissionsExt, symlink};
 
     #[test]

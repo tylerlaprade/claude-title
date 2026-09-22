@@ -13,6 +13,7 @@ use std::process::{Command, Stdio};
 
 #[derive(Default, Deserialize)]
 struct HookInput {
+    agent_id: Option<String>,
     hook_event_name: Option<String>,
     session_id: Option<String>,
     transcript_path: Option<PathBuf>,
@@ -36,6 +37,9 @@ pub fn run() -> Result<()> {
     }
 
     let input: HookInput = serde_json::from_reader(io::stdin()).unwrap_or_default();
+    if input.agent_id.is_some() {
+        return Ok(());
+    }
     let Some(kind) = input
         .hook_event_name
         .as_deref()
@@ -64,10 +68,11 @@ pub fn run() -> Result<()> {
     }
 
     let paths = state::paths_for_tty(&tty)?;
-    let previous = state::read(&paths.state)?
-        .filter(|stored| stored.value.claude_pid == claude_pid)
-        .map(|stored| stored.value);
+    let state_lock = state::lock(&paths.state)?;
     let event = input.hook_event_name.as_deref().unwrap_or("");
+    let previous = state::read(&paths.state)?
+        .filter(|stored| stored.value.claude_pid == claude_pid && event != "SessionStart")
+        .map(|stored| stored.value);
     let running_tools = running_tools(
         event,
         input.tool_name.as_deref().unwrap_or(""),
@@ -94,6 +99,10 @@ pub fn run() -> Result<()> {
     };
     let is_prompt = event == "UserPromptSubmit";
     let input_transcript = input.transcript_path.filter(|path| path.is_file());
+    let mut title_scan = previous
+        .as_ref()
+        .map(|value| value.title_scan.clone())
+        .unwrap_or_default();
     let (transcript_path, transcript_offset) = if is_prompt {
         match input_transcript.as_deref() {
             Some(path) => {
@@ -110,13 +119,14 @@ pub fn run() -> Result<()> {
     let custom_title = transcript_path
         .as_deref()
         .or(input_transcript.as_deref())
-        .and_then(latest_session_title);
+        .and_then(|path| title_scan.refresh(path));
     let value = State {
         kind,
         epoch: state::epoch(),
         claude_pid,
         project: project_name(input.cwd.as_deref()),
         custom_title,
+        title_scan,
         transcript_path,
         transcript_offset,
         resolved_dialog: matches!(event, "PostToolUse" | "PostToolUseFailure")
@@ -127,8 +137,9 @@ pub fn run() -> Result<()> {
         pending_beyond_shells,
     };
     state::write(&paths.state, &value)?;
+    drop(state_lock);
 
-    if !daemon_running(&paths.lock)? {
+    if kind != StateKind::End && !daemon_running(&paths.lock)? {
         spawn_daemon(&tty, &paths.state, &paths.lock, claude_pid)?;
     }
     Ok(())
@@ -212,49 +223,9 @@ fn running_tools(event: &str, tool: &str, previous: &[String]) -> Vec<String> {
     }
 }
 
-// Claude Code writes two record types into the JSONL transcript that can name
-// the session:
-//
-//   {"type":"custom-title","customTitle":"..."}   from /rename
-//   {"type":"agent-setting","agentSetting":"..."} from `claude --name ...` or
-//                                                 the /name command
-//
-// Both re-appear on resume and the CLI re-emits agent-setting each turn, so
-// scanning to the end of the file gets the latest of each. A user who runs
-// /rename after a CLI-assigned name wants the /rename to win even though
-// agent-setting keeps firing, so custom-title takes precedence when present.
-// Scanning the file is cheap enough at hook cadence; the substring pre-filter
-// keeps unrelated turn records from being parsed.
+#[cfg(test)]
 fn latest_session_title(path: &Path) -> Option<String> {
-    #[derive(Deserialize)]
-    struct Record {
-        #[serde(rename = "type")]
-        kind: String,
-        #[serde(rename = "customTitle")]
-        custom_title: Option<String>,
-        #[serde(rename = "agentSetting")]
-        agent_setting: Option<String>,
-    }
-    let contents = fs::read_to_string(path).ok()?;
-    let mut latest_custom = None;
-    let mut latest_agent = None;
-    for line in contents.lines() {
-        if !line.contains(r#""type":"custom-title""#) && !line.contains(r#""type":"agent-setting""#)
-        {
-            continue;
-        }
-        let Ok(record) = serde_json::from_str::<Record>(line) else {
-            continue;
-        };
-        match record.kind.as_str() {
-            "custom-title" => latest_custom = record.custom_title,
-            "agent-setting" => latest_agent = record.agent_setting,
-            _ => {}
-        }
-    }
-    latest_custom
-        .or(latest_agent)
-        .filter(|value| !value.is_empty())
+    crate::session_title::SessionTitle::default().refresh(path)
 }
 
 fn state_kind_for_event(event: &str) -> Option<StateKind> {
@@ -288,10 +259,13 @@ fn tty_for_pid(pid: u32) -> Result<Option<PathBuf>> {
         }));
     }
 
-    let output = Command::new("/bin/ps")
-        .args(["-o", "tty=", "-p", &pid.to_string()])
-        .output()
-        .context("failed to inspect Claude's terminal")?;
+    let output = crate::subprocess::output(Command::new("/bin/ps").args([
+        "-o",
+        "tty=",
+        "-p",
+        &pid.to_string(),
+    ]))
+    .context("failed to inspect Claude's terminal")?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -415,6 +389,7 @@ mod tests {
             claude_pid: 1,
             project: "example".to_string(),
             custom_title: None,
+            title_scan: crate::session_title::SessionTitle::default(),
             transcript_path: None,
             transcript_offset: 0,
             running_tools: names(running),

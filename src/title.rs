@@ -88,6 +88,9 @@ mod ghostty {
     use std::io::{BufRead, BufReader, Write};
     use std::path::Path;
     use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const REPLY_TIMEOUT: Duration = Duration::from_secs(2);
 
     const SCRIPT: &str = include_str!("ghostty.js");
 
@@ -112,6 +115,8 @@ mod ghostty {
             let replies =
                 BufReader::new(child.stdout.take().context("missing Ghostty reply pipe")?);
             let mut connection = Self { child, replies };
+            crate::subprocess::nonblocking(connection.replies.get_ref())?;
+            crate::subprocess::nonblocking(connection.child.stdin.as_ref().unwrap())?;
             connection.receive()?;
             Ok(connection)
         }
@@ -128,10 +133,26 @@ mod ghostty {
         }
 
         fn receive(&mut self) -> Result<()> {
-            let mut reply = String::new();
-            self.replies.read_line(&mut reply)?;
-            if reply.trim() != "true" {
-                bail!("Ghostty title update failed: {}", reply.trim());
+            let deadline = Instant::now() + REPLY_TIMEOUT;
+            let mut reply = Vec::new();
+            loop {
+                match self.replies.read_until(b'\n', &mut reply) {
+                    Ok(0) => bail!("Ghostty title connection closed"),
+                    Ok(_) if reply.ends_with(b"\n") => break,
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error).context("failed to read Ghostty reply"),
+                }
+                if Instant::now() >= deadline {
+                    bail!("Ghostty title reply timed out");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if reply != b"true\n" {
+                bail!(
+                    "Ghostty title update failed: {}",
+                    String::from_utf8_lossy(&reply).trim()
+                );
             }
             Ok(())
         }
@@ -153,22 +174,116 @@ mod ghostty {
         use std::os::fd::FromRawFd;
 
         fn mock_script(body: &str) -> String {
-            SCRIPT.replace("Application(\"com.mitchellh.ghostty\")", body)
+            SCRIPT.replace("connectGhostty(argv[0])", body)
+        }
+
+        #[test]
+        fn an_absent_ghostty_is_not_launched() {
+            let script = SCRIPT.replace(
+                "$.NSRunningApplication.runningApplicationsWithBundleIdentifier(\"com.mitchellh.ghostty\")",
+                "({count: 0})",
+            );
+            let script = script.replace("Application(", "testApplication(");
+            let script = format!(
+                "const testApplication = () => {{ throw new Error('Unexpected application lookup'); }};\n{script}"
+            );
+            let error = Connection::start(&script, Path::new("/dev/test"))
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("Ghostty terminal not found"));
+        }
+
+        #[test]
+        fn a_closed_ghostty_is_not_reacquired_for_a_title_update() {
+            let script =
+                mock_script("({setTitle: () => { throw new Error('Process has exited'); }})");
+            let mut connection = Connection::start(&script, Path::new("/dev/test")).unwrap();
+            assert!(
+                connection
+                    .write("Ready")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Process has exited")
+            );
+        }
+
+        #[test]
+        fn a_stalled_reply_times_out_and_reaps_the_helper() {
+            let mut connection = Connection::start(
+                "ObjC.import('Foundation'); this.run = () => { $.NSFileHandle.fileHandleWithStandardOutput.writeData($('true\\n').dataUsingEncoding($.NSUTF8StringEncoding)); $.NSThread.sleepForTimeInterval(30); };",
+                Path::new("/dev/test"),
+            ).unwrap();
+            let helper_pid = connection.child.id();
+            let started = Instant::now();
+            assert!(
+                connection
+                    .write("Ready")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("timed out")
+            );
+            assert!(started.elapsed() < Duration::from_secs(5));
+            drop(connection);
+            assert_eq!(unsafe { libc::kill(helper_pid as i32, 0) }, -1);
+        }
+
+        #[test]
+        #[ignore = "requires a local Ghostty installation"]
+        fn a_native_process_target_does_not_relaunch_a_quit_ghostty() {
+            struct GhosttyProcess(Child);
+            impl Drop for GhosttyProcess {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let mut ghostty = GhosttyProcess(
+                Command::new("/Applications/Ghostty.app/Contents/MacOS/ghostty")
+                    .args([
+                        "--config-default-files=false",
+                        "--initial-window=false",
+                        "--window-save-state=never",
+                        "--auto-update=off",
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let script = SCRIPT.to_string()
+                + r#"
+this.run = argv => {
+    try {
+        const pid = Number(argv[0]);
+        terminals(pid);
+        reply(true);
+        while ($.getchar() !== 10) {}
+        terminals(pid);
+        reply(true);
+    } catch (error) { reply(String(error)); }
+};
+"#;
+            let pid = ghostty.0.id().to_string();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut connection = loop {
+                match Connection::start(&script, Path::new(&pid)) {
+                    Ok(connection) => break connection,
+                    Err(error) if Instant::now() >= deadline => {
+                        panic!("native connection failed: {error}")
+                    }
+                    Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                }
+            };
+            ghostty.0.kill().unwrap();
+            ghostty.0.wait().unwrap();
+            let error = connection.write("Ready").unwrap_err();
+            assert!(!error.to_string().contains("timed out"), "{error}");
         }
 
         #[test]
         fn native_titles_preserve_unicode_and_treat_titles_as_data() {
-            let script = mock_script(
-                r"({
-                    terminals: {
-                        whose: query => () => query.tty === '/dev/test' ? [{id: () => 'surface'}] : [],
-                        byId: id => id
-                    },
-                    performAction: (action, target) => {
-                        return target.on === 'surface' && action === 'set_surface_title:' + expected.shift();
-                    }
-                })",
-            );
+            let script = mock_script(r"({setTitle: title => title === expected.shift()})");
             let script = format!(
                 "const expected = ['⠋ Working | 漢字', '✳ Ready | \"quoted\" \\\\ path', ''];\n{script}"
             );
@@ -180,24 +295,20 @@ mod ghostty {
 
         #[test]
         fn a_missing_surface_does_not_fall_back_to_terminal_output() {
-            let script = mock_script("({terminals: {whose: () => () => []}})");
+            let script = mock_script("(() => { throw new Error('Missing surface'); })()");
             assert!(Connection::start(&script, Path::new("/dev/missing")).is_err());
         }
 
         #[test]
         fn rejected_actions_are_reported() {
-            let script = mock_script(
-                "({terminals: {whose: () => () => [{id: () => 'surface'}], byId: id => id}, performAction: () => false})",
-            );
+            let script = mock_script("({setTitle: () => false})");
             let mut connection = Connection::start(&script, Path::new("/dev/test")).unwrap();
             assert!(connection.write("Ready").is_err());
         }
 
         #[test]
         fn native_titles_do_not_split_a_partially_written_divider() {
-            let script = mock_script(
-                "({terminals: {whose: () => () => [{id: () => 'surface'}], byId: id => id}, performAction: () => true})",
-            );
+            let script = mock_script("({setTitle: () => true})");
             let connection = Connection::start(&script, Path::new("/dev/test")).unwrap();
             let helper_pid = connection.child.id();
             let mut title = TerminalTitle::Ghostty(connection);

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::fs::{self, OpenOptions, Permissions};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -32,6 +33,8 @@ pub struct State {
     // so many tabs in one project stay distinguishable.
     #[serde(default)]
     pub custom_title: Option<String>,
+    #[serde(default)]
+    pub title_scan: crate::session_title::SessionTitle,
     pub transcript_path: Option<PathBuf>,
     pub transcript_offset: u64,
     // Tools that started and have not reported completion. A dialog belongs to
@@ -99,6 +102,21 @@ pub fn read(path: &Path) -> Result<Option<StoredState>> {
         return Ok(None);
     };
     Ok(Some(StoredState { raw, value }))
+}
+
+pub fn lock(path: &Path) -> Result<File> {
+    let path = path.with_extension("update-lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("failed to lock {}", path.display()))?;
+    Ok(file)
 }
 
 pub fn write(path: &Path, value: &State) -> Result<()> {

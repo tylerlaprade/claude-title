@@ -1,4 +1,5 @@
 use claude_title::state;
+use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
@@ -563,11 +564,11 @@ fn a_daemon_steps_aside_when_the_binary_is_replaced() {
     fs::rename(&replacement, &binary).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(4);
-    while Instant::now() < deadline && paths.lock.exists() {
+    while Instant::now() < deadline && daemon_holds_lock(&paths.lock) {
         thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        !paths.lock.exists(),
+        !daemon_holds_lock(&paths.lock),
         "daemon did not step aside after the binary was replaced"
     );
 
@@ -619,13 +620,91 @@ fn wait_for_daemon_exit(tty: &Path) {
     let paths = state::paths_for_tty(tty).unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
     while Instant::now() < deadline {
-        if !paths.lock.exists() {
+        if !daemon_holds_lock(&paths.lock) {
             let _ = fs::remove_file(paths.state);
             return;
         }
         thread::sleep(Duration::from_millis(50));
     }
     panic!("title daemon did not exit");
+}
+
+fn daemon_holds_lock(path: &Path) -> bool {
+    let Ok(file) = OpenOptions::new().read(true).write(true).open(path) else {
+        return false;
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => false,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
+        Err(error) => panic!("failed to inspect daemon lock: {error}"),
+    }
+}
+
+#[test]
+fn concurrent_tool_hooks_preserve_every_in_flight_tool() {
+    let mut pty = Pty::open();
+    let claude = sleeper();
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionStart"}"#,
+    );
+    pty.wait_for(b"Ready");
+    thread::scope(|scope| {
+        for index in 0..8 {
+            let tty = &pty.slave_path;
+            let pid = claude.0.id();
+            scope.spawn(move || {
+                run_hook(
+                    tty,
+                    pid,
+                    &format!(r#"{{"hook_event_name":"PreToolUse","tool_name":"tool-{index}"}}"#),
+                )
+            });
+        }
+    });
+    let paths = state::paths_for_tty(&pty.slave_path).unwrap();
+    let current = state::read(&paths.state).unwrap().unwrap();
+    assert_eq!(current.value.running_tools.len(), 8);
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
+#[test]
+fn subagent_hooks_do_not_overwrite_the_main_session_title() {
+    let mut pty = Pty::open();
+    let claude = sleeper();
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionStart","cwd":"/tmp/main"}"#,
+    );
+    pty.wait_for(b"Ready | main");
+    let paths = state::paths_for_tty(&pty.slave_path).unwrap();
+    let before = state::read(&paths.state).unwrap().unwrap().raw;
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"PreToolUse","agent_id":"worker","tool_name":"Bash","cwd":"/tmp/worker"}"#,
+    );
+    assert_eq!(state::read(&paths.state).unwrap().unwrap().raw, before);
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
+}
+
+#[test]
+fn a_session_end_does_not_start_a_new_title_daemon() {
+    let mut pty = Pty::open();
+    let claude = sleeper();
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd"}"#,
+    );
+    assert!(pty.read_for(Duration::from_millis(300)).is_empty());
+    let paths = state::paths_for_tty(&pty.slave_path).unwrap();
+    assert!(!daemon_holds_lock(&paths.lock));
+    fs::remove_file(paths.state).unwrap();
 }
 
 fn tty_path(fd: RawFd) -> PathBuf {

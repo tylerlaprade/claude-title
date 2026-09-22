@@ -1,9 +1,9 @@
 [package]
 name = "claude-title"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.88"
-exclude = ["AGENTS.md", ".hooks"]
+exclude = ["AGENTS.md", ".hooks", "package.json", "package-lock.json", "eslint.config.mjs"]
 description = "Show Claude Code's status in the terminal tab title."
 license = "GPL-3.0-only"
 repository = "https://github.com/tylerlaprade/claude-title"

@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::thread;
@@ -54,7 +54,7 @@ pub fn run(tty_path: &Path, state_path: &Path, lock_path: &Path, initial_pid: u3
 
     let result = TerminalTitle::open(tty_path)
         .and_then(|mut tty| run_loop(&mut tty, state_path, initial_pid));
-    remove_own_lock(&mut lock, lock_path);
+    lock.set_len(0)?;
     result
 }
 
@@ -280,7 +280,7 @@ fn executable_signature() -> Option<(u64, u64)> {
 }
 
 fn process_alive(pid: u32) -> bool {
-    if pid > i32::MAX as u32 {
+    if pid == 0 || pid > i32::MAX as u32 {
         return false;
     }
     if unsafe { libc::kill(pid as i32, 0) } == 0 {
@@ -296,7 +296,7 @@ fn process_alive(pid: u32) -> bool {
 // prompt that follows it, or a later tool result, means the session moved on.
 fn transcript_interrupt_state(
     path: Option<&Path>,
-    start: u64,
+    _start: u64,
     position: u64,
     interrupted: bool,
 ) -> (bool, u64) {
@@ -307,26 +307,27 @@ fn transcript_interrupt_state(
         return (interrupted, position);
     };
     let length = file.metadata().map_or(0, |metadata| metadata.len());
-    let position = if position > length { start } else { position };
+    let mut position = if position > length { 0 } else { position };
     if file.seek(SeekFrom::Start(position)).is_err() {
         return (interrupted, position);
     }
-    let mut chunk = Vec::new();
-    if file.read_to_end(&mut chunk).is_err() {
-        return (interrupted, position);
-    }
-    // A record is only readable once its newline lands; anything after the
-    // last one is a partial write to re-read on the next scan.
-    let Some(complete) = chunk.iter().rposition(|byte| *byte == b'\n') else {
-        return (interrupted, position);
-    };
+    let mut reader = BufReader::new(file);
+    let mut record = Vec::new();
     let mut interrupted = interrupted;
-    for record in chunk[..complete].split(|byte| *byte == b'\n') {
-        if contains(record, USER_RECORD) {
-            interrupted = contains(record, INTERRUPT_MARKER);
+    loop {
+        record.clear();
+        let Ok(bytes) = reader.read_until(b'\n', &mut record) else {
+            break;
+        };
+        if bytes == 0 || !record.ends_with(b"\n") {
+            break;
         }
+        if contains(&record, USER_RECORD) {
+            interrupted = contains(&record, INTERRUPT_MARKER);
+        }
+        position += bytes as u64;
     }
-    (interrupted, position + complete as u64 + 1)
+    (interrupted, position)
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -336,6 +337,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn set_idle_if_unchanged(path: &Path, observed: &StoredState) -> Result<bool> {
+    let _lock = state::lock(path)?;
     let Some(latest) = state::read(path)? else {
         return Ok(false);
     };
@@ -361,15 +363,6 @@ fn open_lock(path: &Path) -> Result<File> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("failed to open {}", path.display()))
-}
-
-fn remove_own_lock(lock: &mut File, path: &Path) {
-    let _ = lock.seek(SeekFrom::Start(0));
-    let mut value = String::new();
-    let _ = lock.read_to_string(&mut value);
-    if value.trim() == std::process::id().to_string() {
-        let _ = fs::remove_file(path);
-    }
 }
 
 #[cfg(test)]
