@@ -1,6 +1,6 @@
 [package]
 name = "claude-title"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 rust-version = "1.88"
 exclude = ["AGENTS.md", ".hooks", "package.json", "package-lock.json", "eslint.config.mjs"]

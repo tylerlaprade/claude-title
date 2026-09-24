@@ -16,10 +16,9 @@ const sendEvent = (pid, eventClass, eventID, parameters) => {
         code(eventClass), code(eventID), target, -1, 0
     );
     for (const [keyword, value] of parameters) {event.setParamDescriptorForKeyword(value, code(keyword));}
-    const error = Ref();
     const waitReplyNeverInteractDontReconnect = 0x03 | 0x10 | 0x80;
-    const result = event.sendEventWithOptionsTimeoutError(waitReplyNeverInteractDontReconnect, 1, error);
-    if (!result || result.isNil()) {throw new Error(`Ghostty Apple event failed: ${ObjC.unwrap(error[0].localizedDescription)}`);}
+    const result = event.sendEventWithOptionsTimeoutError(waitReplyNeverInteractDontReconnect, 1, Ref());
+    if (!result || result.isNil()) {throw new Error("Ghostty did not answer the Apple event");}
     const failure = result.paramDescriptorForKeyword(code("errn"));
     if (failure && !failure.isNil() && failure.int32Value !== 0) {
         throw new Error(`Ghostty Apple event error ${failure.int32Value}`);
