@@ -1,6 +1,0 @@
-{
-  "name": "claude-title-development",
-  "private": true,
-  "scripts": { "lint": "eslint src/ghostty.js --max-warnings=0" },
-  "devDependencies": { "@eslint/js": "10.0.1", "eslint": "10.11.0" }
-}

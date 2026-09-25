@@ -226,7 +226,7 @@ impl ProcessTable {
     }
 }
 
-pub(crate) fn belongs_to_terminal(mut pid: u32, terminal: &str) -> anyhow::Result<bool> {
+pub(crate) fn terminal_ancestor(mut pid: u32, terminal: &str) -> anyhow::Result<Option<u32>> {
     let table = ProcessTable::capture()?;
     for _ in 0..=table.parents.len() {
         if table
@@ -234,10 +234,10 @@ pub(crate) fn belongs_to_terminal(mut pid: u32, terminal: &str) -> anyhow::Resul
             .get(&pid)
             .is_some_and(|program| program == terminal)
         {
-            return Ok(true);
+            return Ok(Some(pid));
         }
         if pid <= 1 {
-            return Ok(false);
+            return Ok(None);
         }
         pid = *table
             .parents
