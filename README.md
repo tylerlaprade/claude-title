@@ -51,7 +51,10 @@ terminals use OSC 0 with a best-effort output queue check. Shell probing needs
 holds the waiting title.
 
 Hooks serialize state changes per terminal; background subagent hooks do not
-overwrite the main session's title. Transcript name lookup reads only appended
+overwrite the main session's title, except that a subagent's permission prompt
+shows Action required until it is answered. Claude Code reports no event at the
+moment you approve a prompt, so the title changes when the approved tool
+finishes. Transcript name lookup reads only appended
 records after the first scan. Process probes and Ghostty replies have bounded
 waits. The daemon retries a failed connection while its owning session remains
 alive, so restoring a session does not require another prompt to initialize its
