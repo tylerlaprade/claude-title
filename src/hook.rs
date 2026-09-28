@@ -1,8 +1,9 @@
 use crate::probe;
-use crate::state::{self, State, StateKind};
+use crate::state::{self, Dialog, State, StateKind};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::Deserialize;
+use serde_json::Value;
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -19,6 +20,8 @@ struct HookInput {
     transcript_path: Option<PathBuf>,
     cwd: Option<PathBuf>,
     tool_name: Option<String>,
+    #[serde(default)]
+    tool_input: Value,
     #[serde(default)]
     background_tasks: Vec<BackgroundTask>,
 }
@@ -37,29 +40,31 @@ pub fn run() -> Result<()> {
     }
 
     let input: HookInput = serde_json::from_reader(io::stdin()).unwrap_or_default();
-    if input.agent_id.is_some() {
+    let event = input.hook_event_name.as_deref().unwrap_or("");
+    let agent = input.agent_id.as_deref().unwrap_or("");
+    // Subagents share the main thread's dialogs but never its activity.
+    let event_activity = if agent.is_empty() {
+        activity_for_event(event)
+    } else {
+        None
+    };
+    if event_activity.is_none() && !concerns_dialogs(event) {
         return Ok(());
     }
-    let Some(kind) = input
-        .hook_event_name
-        .as_deref()
-        .and_then(state_kind_for_event)
-    else {
-        return Ok(());
-    };
     let claude_pid = claude_pid()?;
     let session_id = input.session_id.as_deref().unwrap_or("");
-    let (kind, pending_beyond_shells, pending_shells) = if kind == StateKind::Idle {
-        let (beyond_shells, shells) =
-            classify_background_tasks(session_id, &input.background_tasks);
-        if beyond_shells || !shells.is_empty() {
-            (StateKind::Pending, beyond_shells, shells)
+    let (event_activity, pending_beyond_shells, pending_shells) =
+        if event_activity == Some(StateKind::Idle) {
+            let (beyond_shells, shells) =
+                classify_background_tasks(session_id, &input.background_tasks);
+            if beyond_shells || !shells.is_empty() {
+                (Some(StateKind::Pending), beyond_shells, shells)
+            } else {
+                (Some(StateKind::Idle), false, Vec::new())
+            }
         } else {
-            (StateKind::Idle, false, Vec::new())
-        }
-    } else {
-        (kind, false, Vec::new())
-    };
+            (event_activity, false, Vec::new())
+        };
     let Some(tty) = tty_for_pid(claude_pid)? else {
         return Ok(());
     };
@@ -69,33 +74,54 @@ pub fn run() -> Result<()> {
 
     let paths = state::paths_for_tty(&tty)?;
     let state_lock = state::lock(&paths.state)?;
-    let event = input.hook_event_name.as_deref().unwrap_or("");
     let previous = state::read(&paths.state)?
         .filter(|stored| stored.value.claude_pid == claude_pid && event != "SessionStart")
         .map(|stored| stored.value);
-    let running_tools = running_tools(
-        event,
-        input.tool_name.as_deref().unwrap_or(""),
-        previous
-            .as_ref()
-            .map_or(&[][..], |value| &value.running_tools),
-    );
-    if is_stale_dialog(kind, previous.as_ref(), state::epoch()) {
+    if event == "Notification" && is_stale_dialog(previous.as_ref(), state::epoch()) {
         return Ok(());
     }
-    // The notification names no tool, so the dialog belongs to whichever tool
-    // is still in flight. A sibling finishing leaves the rest running and must
-    // not clear the title; the last one to finish is the one that resolved it.
-    // Anything else still clears it, so no missed completion can pin the title.
-    let kind = if matches!(event, "PostToolUse" | "PostToolUseFailure")
-        && !running_tools.is_empty()
-        && previous
-            .as_ref()
-            .is_some_and(|value| value.kind == StateKind::Waiting)
-    {
+    let previous_dialogs = previous.as_ref().map_or(&[][..], |value| &value.dialogs);
+    let dialogs = open_dialogs(
+        event,
+        agent,
+        input.tool_name.as_deref().unwrap_or(""),
+        &input.tool_input,
+        previous_dialogs,
+    );
+    if event_activity.is_none() && event != "Notification" && dialogs == previous_dialogs {
+        return Ok(());
+    }
+    let resolved_dialog = !previous_dialogs.is_empty() && dialogs.is_empty();
+    let was_waiting = previous
+        .as_ref()
+        .is_some_and(|value| value.kind == StateKind::Waiting);
+    // A dialog that opened without a permission request behind it, such as an
+    // approval Claude Code asks for outside any tool, reports no close; the
+    // main thread moving on is the only sign it was answered.
+    let waiting = event == "Notification"
+        || (was_waiting
+            && if previous_dialogs.is_empty() {
+                event_activity.is_none()
+            } else {
+                !dialogs.is_empty()
+            });
+    let (activity, pending_shells, pending_beyond_shells) = match (event_activity, &previous) {
+        (Some(activity), _) => (activity, pending_shells, pending_beyond_shells),
+        (None, Some(previous)) => (
+            previous.activity,
+            previous.pending_shells.clone(),
+            previous.pending_beyond_shells,
+        ),
+        (None, None) => (StateKind::Unknown, Vec::new(), false),
+    };
+    let kind = if waiting {
         StateKind::Waiting
     } else {
-        kind
+        activity
+    };
+    let project = match (event_activity, &previous) {
+        (None, Some(previous)) => previous.project.clone(),
+        _ => project_name(input.cwd.as_deref()),
     };
     let is_prompt = event == "UserPromptSubmit";
     let input_transcript = input.transcript_path.filter(|path| path.is_file());
@@ -122,16 +148,16 @@ pub fn run() -> Result<()> {
         .and_then(|path| title_scan.refresh(path));
     let value = State {
         kind,
+        activity,
         epoch: state::epoch(),
         claude_pid,
-        project: project_name(input.cwd.as_deref()),
+        project,
         custom_title,
         title_scan,
         transcript_path,
         transcript_offset,
-        resolved_dialog: matches!(event, "PostToolUse" | "PostToolUseFailure")
-            && running_tools.is_empty(),
-        running_tools,
+        dialogs,
+        resolved_dialog,
         pending_session: session_id.to_string(),
         pending_shells,
         pending_beyond_shells,
@@ -188,38 +214,74 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
 }
 
 // Claude Code arms a dialog's notification on a timer. Answer the dialog just
-// as the timer fires and the notification reaches this hook after the tool has
-// already reported completion, which would pin Action required on a session
-// that has moved on. Only the beat right after that completion is refused, so
-// a dialog opening at any other moment, with or without a tool behind it, still
-// raises the title.
+// as the timer fires and the notification reaches this hook after the dialog
+// has already closed, which would pin Action required on a session that has
+// moved on. Only the beat right after that close is refused, so a dialog
+// opening at any other moment, with or without a tool behind it, still raises
+// the title.
 const STALE_DIALOG_SECONDS: u64 = 2;
 
-fn is_stale_dialog(kind: StateKind, previous: Option<&State>, now: u64) -> bool {
-    kind == StateKind::Waiting
-        && previous.is_some_and(|previous| {
-            previous.resolved_dialog && now.saturating_sub(previous.epoch) <= STALE_DIALOG_SECONDS
-        })
+fn is_stale_dialog(previous: Option<&State>, now: u64) -> bool {
+    previous.is_some_and(|previous| {
+        previous.resolved_dialog && now.saturating_sub(previous.epoch) <= STALE_DIALOG_SECONDS
+    })
 }
 
-// A turn boundary settles every tool, so the list starts empty there rather
-// than carrying a tool that was interrupted before it could report.
-fn running_tools(event: &str, tool: &str, previous: &[String]) -> Vec<String> {
+fn concerns_dialogs(event: &str) -> bool {
+    matches!(
+        event,
+        "Notification"
+            | "PermissionRequest"
+            | "PostToolUse"
+            | "PostToolUseFailure"
+            | "PostToolBatch"
+            | "SubagentStop"
+    )
+}
+
+// As of Claude Code 2.1.284 the notification names neither the tool nor the
+// agent behind a dialog, but the permission request that opens it names both
+// the tool and, for a subagent, its agent_id. A dialog closes when its tool
+// completes, whose input then carries every requested field (an answered
+// question adds its answers). A denied or amended tool never completes with
+// that input, but its batch still ends, and no batch of that agent can end
+// while one of its dialogs is open. A turn boundary or a subagent's stop
+// settles whatever that agent left open.
+fn open_dialogs(
+    event: &str,
+    agent: &str,
+    tool: &str,
+    input: &Value,
+    previous: &[Dialog],
+) -> Vec<Dialog> {
+    let mut open = previous.to_vec();
     match event {
-        "PreToolUse" => {
-            let mut running = previous.to_vec();
-            running.push(tool.to_string());
-            running
-        }
+        "PermissionRequest" => open.push(Dialog {
+            agent: agent.to_string(),
+            tool: tool.to_string(),
+            input: input.clone(),
+        }),
         "PostToolUse" | "PostToolUseFailure" => {
-            let mut running = previous.to_vec();
-            if let Some(finished) = running.iter().position(|running| running == tool) {
-                running.remove(finished);
+            if let Some(answered) = open.iter().position(|dialog| {
+                dialog.agent == agent && dialog.tool == tool && carries(input, &dialog.input)
+            }) {
+                open.remove(answered);
             }
-            running
         }
-        "Notification" => previous.to_vec(),
-        _ => Vec::new(),
+        "PostToolBatch" | "SubagentStop" | "UserPromptSubmit" | "Stop" | "StopFailure" => {
+            open.retain(|dialog| dialog.agent != agent);
+        }
+        _ => {}
+    }
+    open
+}
+
+fn carries(completed: &Value, requested: &Value) -> bool {
+    match (completed, requested) {
+        (Value::Object(completed), Value::Object(requested)) => requested
+            .iter()
+            .all(|(field, value)| completed.get(field) == Some(value)),
+        _ => completed == requested,
     }
 }
 
@@ -228,13 +290,12 @@ fn latest_session_title(path: &Path) -> Option<String> {
     crate::session_title::SessionTitle::default().refresh(path)
 }
 
-fn state_kind_for_event(event: &str) -> Option<StateKind> {
+fn activity_for_event(event: &str) -> Option<StateKind> {
     match event {
         "SessionStart" | "Stop" | "StopFailure" => Some(StateKind::Idle),
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" => {
             Some(StateKind::Busy)
         }
-        "Notification" => Some(StateKind::Waiting),
         "SessionEnd" => Some(StateKind::End),
         _ => None,
     }
@@ -352,44 +413,85 @@ fn spawn_daemon(tty: &Path, state: &Path, lock: &Path, pid: u32) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn names(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| (*value).to_string()).collect()
+    fn bash(command: &str) -> Value {
+        serde_json::json!({ "command": command, "description": "Run it" })
+    }
+
+    fn requested(agent: &str, tool: &str, input: &Value, previous: &[Dialog]) -> Vec<Dialog> {
+        open_dialogs("PermissionRequest", agent, tool, input, previous)
     }
 
     #[test]
-    fn a_tool_runs_until_it_reports_completion() {
-        let started = running_tools("PreToolUse", "Bash", &[]);
-        assert_eq!(started, names(&["Bash"]));
-        assert!(running_tools("PostToolUse", "Bash", &started).is_empty());
+    fn a_dialog_closes_when_its_tool_completes() {
+        let open = requested("", "Bash", &bash("make"), &[]);
+        assert_eq!(open.len(), 1);
+        assert!(open_dialogs("PostToolUse", "", "Bash", &bash("make"), &open).is_empty());
     }
 
     #[test]
-    fn a_sibling_finishing_leaves_the_dialogs_tool_running() {
-        let running = names(&["Bash", "Read"]);
+    fn a_sibling_completing_leaves_the_dialog_open() {
+        let open = requested("", "Bash", &bash("make"), &[]);
         assert_eq!(
-            running_tools("PostToolUse", "Read", &running),
-            names(&["Bash"])
+            open_dialogs("PostToolUse", "", "Bash", &bash("ls"), &open),
+            open
+        );
+        assert_eq!(
+            open_dialogs("PostToolUse", "", "Read", &bash("make"), &open),
+            open
         );
     }
 
     #[test]
-    fn repeated_tools_are_settled_one_at_a_time() {
-        let running = names(&["Bash", "Bash"]);
-        assert_eq!(
-            running_tools("PostToolUse", "Bash", &running),
-            names(&["Bash"])
-        );
+    fn an_answered_question_closes_its_dialog() {
+        let question = serde_json::json!({ "questions": [{ "question": "Deploy?" }] });
+        let open = requested("", "AskUserQuestion", &question, &[]);
+        let answered = serde_json::json!({
+            "questions": [{ "question": "Deploy?" }],
+            "answers": { "Deploy?": "Yes" },
+        });
+        assert!(open_dialogs("PostToolUse", "", "AskUserQuestion", &answered, &open).is_empty());
     }
 
     #[test]
-    fn a_notification_leaves_the_running_tools_alone() {
-        let running = names(&["AskUserQuestion"]);
-        assert_eq!(running_tools("Notification", "", &running), running);
+    fn a_subagents_dialog_closes_only_with_that_subagents_tool() {
+        let open = requested("worker", "Bash", &bash("make"), &[]);
+        assert_eq!(
+            open_dialogs("PostToolUse", "", "Bash", &bash("make"), &open),
+            open
+        );
+        assert!(open_dialogs("PostToolUse", "worker", "Bash", &bash("make"), &open).is_empty());
     }
 
-    fn state(kind: StateKind, epoch: u64, running: &[&str]) -> State {
+    #[test]
+    fn a_denied_tool_closes_its_dialog_when_its_batch_ends() {
+        let open = requested("worker", "Bash", &bash("make"), &[]);
+        let open = requested("", "Bash", &bash("ls"), &open);
+        let settled = open_dialogs("PostToolBatch", "worker", "", &Value::Null, &open);
+        assert_eq!(settled, requested("", "Bash", &bash("ls"), &[]));
+    }
+
+    #[test]
+    fn a_stopped_subagent_leaves_no_dialog_behind() {
+        let open = requested("worker", "Bash", &bash("make"), &[]);
+        assert!(open_dialogs("SubagentStop", "worker", "", &Value::Null, &open).is_empty());
+    }
+
+    #[test]
+    fn a_turn_boundary_settles_only_the_main_threads_dialogs() {
+        let open = requested("", "Bash", &bash("make"), &[]);
+        let open = requested("worker", "Bash", &bash("make"), &open);
+        for boundary in ["UserPromptSubmit", "Stop"] {
+            assert_eq!(
+                open_dialogs(boundary, "", "", &Value::Null, &open),
+                requested("worker", "Bash", &bash("make"), &[])
+            );
+        }
+    }
+
+    fn state(epoch: u64, resolved_dialog: bool) -> State {
         State {
-            kind,
+            kind: StateKind::Busy,
+            activity: StateKind::Busy,
             epoch,
             claude_pid: 1,
             project: "example".to_string(),
@@ -397,8 +499,8 @@ mod tests {
             title_scan: crate::session_title::SessionTitle::default(),
             transcript_path: None,
             transcript_offset: 0,
-            running_tools: names(running),
-            resolved_dialog: running.is_empty(),
+            dialogs: Vec::new(),
+            resolved_dialog,
             pending_session: String::new(),
             pending_shells: Vec::new(),
             pending_beyond_shells: false,
@@ -406,35 +508,19 @@ mod tests {
     }
 
     #[test]
-    fn a_dialog_announced_after_its_tool_finished_is_stale() {
-        let finished = state(StateKind::Busy, 100, &[]);
-        assert!(is_stale_dialog(StateKind::Waiting, Some(&finished), 101));
+    fn a_dialog_announced_after_it_closed_is_stale() {
+        assert!(is_stale_dialog(Some(&state(100, true)), 101));
     }
 
     #[test]
-    fn a_dialog_belonging_to_a_running_tool_stands() {
-        let running = state(StateKind::Busy, 100, &["Bash"]);
-        assert!(!is_stale_dialog(StateKind::Waiting, Some(&running), 101));
-    }
-
-    #[test]
-    fn a_dialog_that_opens_later_stands_even_with_nothing_running() {
-        let finished = state(StateKind::Busy, 100, &[]);
-        assert!(!is_stale_dialog(StateKind::Waiting, Some(&finished), 130));
+    fn a_dialog_that_opens_later_stands() {
+        assert!(!is_stale_dialog(Some(&state(100, true)), 130));
     }
 
     #[test]
     fn a_dialog_that_opens_off_a_settled_session_stands() {
-        let mut prompted = state(StateKind::Busy, 100, &[]);
-        prompted.resolved_dialog = false;
-        assert!(!is_stale_dialog(StateKind::Waiting, Some(&prompted), 101));
-        assert!(!is_stale_dialog(StateKind::Waiting, None, 101));
-    }
-
-    #[test]
-    fn a_turn_boundary_forgets_a_tool_that_never_reported() {
-        assert!(running_tools("UserPromptSubmit", "", &names(&["Bash"])).is_empty());
-        assert!(running_tools("Stop", "", &names(&["Bash"])).is_empty());
+        assert!(!is_stale_dialog(Some(&state(100, false)), 101));
+        assert!(!is_stale_dialog(None, 101));
     }
 
     #[test]

@@ -35,7 +35,7 @@ fn cli_install_and_uninstall_preserve_prior_configuration() {
 
     let hook_command = format!("{} hook", env!("CARGO_BIN_EXE_claude-title"));
     let installed = read_json(&settings);
-    assert_eq!(count_command(&installed, &hook_command), 9);
+    assert_eq!(count_command(&installed, &hook_command), 12);
     assert_eq!(installed["env"]["OTHER"], "yes");
     let receipt = read_json(&home.path().join(".config/claude-title/install.json"));
     assert_eq!(receipt["previous_terminal_title"], "1");

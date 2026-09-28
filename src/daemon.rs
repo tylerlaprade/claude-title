@@ -378,6 +378,10 @@ fn set_idle_if_unchanged(path: &Path, observed: &StoredState) -> Result<bool> {
         return Ok(false);
     }
     let mut replacement = observed.value.clone();
+    replacement.activity = StateKind::Idle;
+    replacement
+        .dialogs
+        .retain(|dialog| !dialog.agent.is_empty());
     replacement.kind = StateKind::Idle;
     replacement.epoch = state::epoch();
     replacement.pending_session = String::new();

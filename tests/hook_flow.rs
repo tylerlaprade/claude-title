@@ -153,6 +153,13 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"PermissionRequest","cwd":"/tmp/example","tool_name":"AskUserQuestion","tool_input":{QUESTION}}}"#
+        ),
+    );
+    run_hook(
+        &pty.slave_path,
+        first_claude.0.id(),
         r#"{"hook_event_name":"Notification","cwd":"/tmp/example"}"#,
     );
     pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
@@ -169,7 +176,9 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     run_hook(
         &pty.slave_path,
         first_claude.0.id(),
-        r#"{"hook_event_name":"PostToolUse","cwd":"/tmp/example","tool_name":"AskUserQuestion"}"#,
+        &format!(
+            r#"{{"hook_event_name":"PostToolUse","cwd":"/tmp/example","tool_name":"AskUserQuestion","tool_input":{ANSWERED_QUESTION}}}"#
+        ),
     );
     pty.wait_for(b" Working | example\x07");
 
@@ -243,6 +252,70 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     wait_for_daemon_exit(&pty.slave_path);
     let trailing = pty.read_for(Duration::from_millis(300));
     assert_eq!(count(&[second_clear, trailing].concat(), b"\x1b]0;\x07"), 1);
+}
+
+const QUESTION: &str =
+    r#"{"questions":[{"question":"Deploy?","options":[{"label":"Yes"},{"label":"No"}]}]}"#;
+const ANSWERED_QUESTION: &str = r#"{"questions":[{"question":"Deploy?","options":[{"label":"Yes"},{"label":"No"}]}],"answers":{"Deploy?":"Yes"}}"#;
+const WORKER_COMMAND: &str =
+    r#"{"command":"rg -n lint ~/Code/other","description":"Search another repo"}"#;
+
+#[test]
+fn a_subagents_answered_dialog_releases_the_title() {
+    let mut pty = Pty::open();
+    let claude = sleeper();
+    let background_subagent = r#"{"hook_event_name":"Stop","cwd":"/tmp/lead","background_tasks":[{"id":"worker","type":"subagent","status":"running","description":"survey","agent_type":"general-purpose"}]}"#;
+    let worker_asks = format!(
+        r#"{{"hook_event_name":"PermissionRequest","agent_id":"worker","cwd":"/tmp/lead","tool_name":"Bash","tool_input":{WORKER_COMMAND}}}"#
+    );
+    let dialog_raised = r#"{"hook_event_name":"Notification","cwd":"/tmp/lead","notification_type":"permission_prompt"}"#;
+
+    run_hook(&pty.slave_path, claude.0.id(), background_subagent);
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | lead\x07");
+
+    run_hook(&pty.slave_path, claude.0.id(), &worker_asks);
+    run_hook(&pty.slave_path, claude.0.id(), dialog_raised);
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | lead\x07");
+
+    // Approved, the subagent's tool completes and the lead goes back to
+    // waiting on it.
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"PostToolUse","agent_id":"worker","cwd":"/tmp/lead","tool_name":"Bash","tool_input":{WORKER_COMMAND}}}"#
+        ),
+    );
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | lead\x07");
+
+    // The lead's own work does not answer a subagent's open dialog.
+    run_hook(&pty.slave_path, claude.0.id(), &worker_asks);
+    run_hook(&pty.slave_path, claude.0.id(), dialog_raised);
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | lead\x07");
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"PreToolUse","cwd":"/tmp/lead","tool_name":"Read"}"#,
+    );
+    let lead_output = pty.read_for(Duration::from_millis(650));
+    assert!(!contains(&lead_output, b" Working | lead"));
+
+    // Denied, the subagent's tool never completes, but its batch ends.
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"PostToolBatch","agent_id":"worker","cwd":"/tmp/lead"}"#,
+    );
+    pty.wait_for(b" Working | lead\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"SessionEnd","cwd":"/tmp/lead"}"#,
+    );
+    pty.wait_for(b"\x1b]0;\x07");
+    drop(claude);
+    wait_for_daemon_exit(&pty.slave_path);
 }
 
 #[test]
@@ -641,7 +714,7 @@ fn daemon_holds_lock(path: &Path) -> bool {
 }
 
 #[test]
-fn concurrent_tool_hooks_preserve_every_in_flight_tool() {
+fn concurrent_permission_requests_preserve_every_open_dialog() {
     let mut pty = Pty::open();
     let claude = sleeper();
     run_hook(
@@ -658,14 +731,16 @@ fn concurrent_tool_hooks_preserve_every_in_flight_tool() {
                 run_hook(
                     tty,
                     pid,
-                    &format!(r#"{{"hook_event_name":"PreToolUse","tool_name":"tool-{index}"}}"#),
+                    &format!(
+                        r#"{{"hook_event_name":"PermissionRequest","tool_name":"tool-{index}"}}"#
+                    ),
                 );
             });
         }
     });
     let paths = state::paths_for_tty(&pty.slave_path).unwrap();
     let current = state::read(&paths.state).unwrap().unwrap();
-    assert_eq!(current.value.running_tools.len(), 8);
+    assert_eq!(current.value.dialogs.len(), 8);
     drop(claude);
     wait_for_daemon_exit(&pty.slave_path);
 }
@@ -682,11 +757,15 @@ fn subagent_hooks_do_not_overwrite_the_main_session_title() {
     pty.wait_for(b"Ready | main");
     let paths = state::paths_for_tty(&pty.slave_path).unwrap();
     let before = state::read(&paths.state).unwrap().unwrap().raw;
-    run_hook(
-        &pty.slave_path,
-        claude.0.id(),
-        r#"{"hook_event_name":"PreToolUse","agent_id":"worker","tool_name":"Bash","cwd":"/tmp/worker"}"#,
-    );
+    for event in ["PreToolUse", "PostToolUse", "PostToolBatch"] {
+        run_hook(
+            &pty.slave_path,
+            claude.0.id(),
+            &format!(
+                r#"{{"hook_event_name":"{event}","agent_id":"worker","tool_name":"Bash","cwd":"/tmp/worker"}}"#
+            ),
+        );
+    }
     assert_eq!(state::read(&paths.state).unwrap().unwrap().raw, before);
     drop(claude);
     wait_for_daemon_exit(&pty.slave_path);

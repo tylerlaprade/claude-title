@@ -8,7 +8,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StateKind {
     Busy,
@@ -18,6 +18,7 @@ pub enum StateKind {
     End,
     // A daemon can outlive the hook binary that spawned it, so a kind written
     // by a newer hook must parse instead of blinding the daemon to the file.
+    #[default]
     #[serde(other)]
     Unknown,
 }
@@ -25,6 +26,10 @@ pub enum StateKind {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct State {
     pub kind: StateKind,
+    // What the main thread is doing, which the kind shows whenever no
+    // permission dialog is waiting on the user.
+    #[serde(default)]
+    pub activity: StateKind,
     pub epoch: u64,
     pub claude_pid: u32,
     pub project: String,
@@ -37,12 +42,11 @@ pub struct State {
     pub title_scan: crate::session_title::SessionTitle,
     pub transcript_path: Option<PathBuf>,
     pub transcript_offset: u64,
-    // Tools that started and have not reported completion. A dialog belongs to
-    // one of them, so the waiting title stands until the list empties.
+    // Permission dialogs that opened and have not closed, from the main thread
+    // or any subagent. The waiting title stands until the last one closes.
     #[serde(default)]
-    pub running_tools: Vec<String>,
-    // Set by the completion that emptied that list: the moment an open dialog,
-    // if there was one, was resolved.
+    pub dialogs: Vec<Dialog>,
+    // Set by the event that closed the last open dialog.
     #[serde(default)]
     pub resolved_dialog: bool,
     // Only meaningful while kind is Pending; the daemon re-probes these
@@ -53,6 +57,13 @@ pub struct State {
     pub pending_shells: Vec<String>,
     #[serde(default)]
     pub pending_beyond_shells: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Dialog {
+    pub agent: String,
+    pub tool: String,
+    pub input: serde_json::Value,
 }
 
 pub struct StoredState {
