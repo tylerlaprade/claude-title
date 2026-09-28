@@ -17,6 +17,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
+      - run: curl -fsSL -o "$HOME/.rustfmt.toml" https://raw.githubusercontent.com/tylerlaprade/dotfiles/master/.rustfmt.toml
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
