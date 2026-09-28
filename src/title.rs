@@ -38,12 +38,7 @@ impl TerminalTitle {
             #[cfg(not(target_os = "macos"))]
             let _ = ghostty;
         }
-        OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOCTTY)
-            .open(tty)
-            .with_context(|| format!("failed to open {}", tty.display()))
-            .map(Self::Osc)
+        open_terminal(tty).map(Self::Osc)
     }
 
     pub(crate) fn write(&mut self, title: &str) -> Result<bool> {
@@ -61,6 +56,28 @@ impl TerminalTitle {
         }
         Ok(true)
     }
+}
+
+// A blocking open waits for the terminal's carrier, which never comes back once
+// the terminal's other end closes while a process still holds it, and would
+// hold the daemon and its lock forever.
+fn open_terminal(tty: &Path) -> Result<File> {
+    let terminal = OpenOptions::new()
+        .write(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(tty)
+        .with_context(|| format!("failed to open {}", tty.display()))?;
+    blocking(&terminal).context("failed to configure the terminal")?;
+    Ok(terminal)
+}
+
+fn blocking(tty: &File) -> std::io::Result<()> {
+    let fd = tty.as_raw_fd();
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn clean_title(value: &str) -> String {
@@ -104,5 +121,31 @@ mod tests {
     #[test]
     fn title_removes_control_characters() {
         assert_eq!(clean_title("one\n\ttwo\u{7f} ✳"), "onetwo ✳");
+    }
+
+    #[test]
+    fn a_closed_terminal_does_not_hold_the_daemon() {
+        let mut master = -1;
+        let mut slave = -1;
+        let opened = unsafe {
+            libc::openpty(
+                &raw mut master,
+                &raw mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        let name = unsafe { std::ffi::CStr::from_ptr(libc::ttyname(slave)) };
+        let path = std::path::PathBuf::from(name.to_str().unwrap());
+        unsafe { libc::close(master) };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(open_terminal(&path).is_ok());
+        });
+        let answered = receiver.recv_timeout(Duration::from_secs(2));
+        unsafe { libc::close(slave) };
+        assert!(answered.is_ok());
     }
 }
