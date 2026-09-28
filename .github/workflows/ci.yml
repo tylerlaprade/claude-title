@@ -14,6 +14,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      - run: curl -fsSL -o "$HOME/.shellcheckrc" https://raw.githubusercontent.com/tylerlaprade/dotfiles/master/.shellcheckrc
+      - run: shellcheck release.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt

@@ -6,7 +6,8 @@ set -eu
 version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
 tag="v$version"
 
-test -z "$(git status --porcelain)" || { echo "working tree not clean" >&2; exit 1; }
+status=$(git status --porcelain)
+test -z "$status" || { echo "working tree not clean" >&2; exit 1; }
 git tag "$tag"
 git push origin master "$tag"
 
