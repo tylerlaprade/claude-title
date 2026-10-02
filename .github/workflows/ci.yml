@@ -15,7 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       # ShellCheck runs on Linux only: the macOS runners do not have it.
-      # The runner's preinstalled ShellCheck is older than the Homebrew release used locally and disagrees with it.
       - if: runner.os == 'Linux'
         name: Install current ShellCheck
         run: |
