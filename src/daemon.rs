@@ -93,7 +93,7 @@ fn supervise_title(
 
 fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Result<()> {
     let mut mode = None;
-    let mut static_title: Option<(StateKind, String)> = None;
+    let mut static_title: Option<String> = None;
     let mut frame = 0;
     let mut monitor_pid = initial_pid;
     let mut transcript_path = None;
@@ -127,42 +127,34 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 }
             }
 
-            let label = title_label(&current.value);
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    if tty.write(&format!("{} {} | Working", FRAMES[frame], label))? {
+                    if tty.write(&title_text(&current.value, FRAMES[frame], "Working"))? {
                         frame = (frame + 1) % FRAMES.len();
                     }
                 }
                 StateKind::Idle | StateKind::Unknown => {
-                    let title = (new_mode, label.to_string());
-                    if static_title.as_ref() != Some(&title)
-                        && tty.write(&format!("✳ {label} | Ready"))?
-                    {
+                    let title = title_text(&current.value, "✳", "Ready");
+                    if static_title.as_ref() != Some(&title) && tty.write(&title)? {
                         static_title = Some(title);
                     }
                 }
                 StateKind::Pending => {
-                    let title = (StateKind::Pending, label.to_string());
-                    if static_title.as_ref() != Some(&title)
-                        && tty.write(&format!("⧗ {label} | Waiting"))?
-                    {
+                    let title = title_text(&current.value, "⧗", "Waiting");
+                    if static_title.as_ref() != Some(&title) && tty.write(&title)? {
                         static_title = Some(title);
                     }
                 }
                 StateKind::Waiting => {
-                    let title = (StateKind::Waiting, label.to_string());
-                    if static_title.as_ref() != Some(&title)
-                        && tty.write(&format!("⚠ {label} | Action required"))?
-                    {
+                    let title = title_text(&current.value, "⚠", "Action required");
+                    if static_title.as_ref() != Some(&title) && tty.write(&title)? {
                         static_title = Some(title);
                     }
                 }
                 StateKind::End => {
-                    let title = (StateKind::End, label.to_string());
-                    if static_title.as_ref() != Some(&title) && tty.write("")? {
-                        static_title = Some(title);
+                    if static_title.as_deref() != Some("") && tty.write("")? {
+                        static_title = Some(String::new());
                     }
                 }
             }
@@ -182,10 +174,10 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 last_scan = now;
                 if interrupted && !was_interrupted {
                     if set_idle_if_unchanged(state_path, &current)? {
-                        let label = title_label(&current.value);
+                        let title = title_text(&current.value, "✳", "Ready");
                         mode = Some(StateKind::Idle);
-                        if tty.write(&format!("✳ {label} | Ready"))? {
-                            static_title = Some((StateKind::Idle, label.to_string()));
+                        if tty.write(&title)? {
+                            static_title = Some(title);
                         }
                     } else {
                         transcript_position = transcript_start;
@@ -246,10 +238,10 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     }
                     watch.shells = kept;
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
-                        let label = title_label(&current.value);
+                        let title = title_text(&current.value, "✳", "Ready");
                         mode = Some(StateKind::Idle);
-                        if tty.write(&format!("✳ {label} | Ready"))? {
-                            static_title = Some((StateKind::Idle, label.to_string()));
+                        if tty.write(&title)? {
+                            static_title = Some(title);
                         }
                     }
                 }
@@ -297,13 +289,18 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
 }
 
 // Many tabs in one project all read the same project name; when the user has
-// run /rename in the Claude Code CLI, that name is what distinguishes them.
-fn title_label(state: &State) -> &str {
-    state
+// run /rename in the Claude Code CLI, that name is what distinguishes them, so
+// it leads and the project trails as context.
+fn title_text(state: &State, indicator: &str, status: &str) -> String {
+    let project = &state.project;
+    match state
         .custom_title
         .as_deref()
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&state.project)
+        .filter(|name| !name.is_empty())
+    {
+        Some(name) => format!("{indicator} {name} | {status} | {project}"),
+        None => format!("{indicator} {project} | {status}"),
+    }
 }
 
 fn executable_signature() -> Option<(u64, u64)> {

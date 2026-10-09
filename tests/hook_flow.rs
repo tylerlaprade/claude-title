@@ -527,14 +527,14 @@ fn a_renamed_session_shows_its_name_in_place_of_the_project() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" Smart-Title | Working\x07");
+    pty.wait_for(b" Smart-Title | Working | nulspace-io\x07");
 
     run_hook(
         &pty.slave_path,
         claude.0.id(),
         r#"{"hook_event_name":"Stop","cwd":"/tmp/nulspace-io"}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Smart-Title | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Smart-Title | Ready | nulspace-io\x07");
 
     // A later rename lands on the same session.
     append_records(
@@ -549,7 +549,7 @@ fn a_renamed_session_shows_its_name_in_place_of_the_project() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" Renamed-Again | Working\x07");
+    pty.wait_for(b" Renamed-Again | Working | nulspace-io\x07");
 
     run_hook(
         &pty.slave_path,
@@ -580,7 +580,7 @@ fn a_cli_assigned_session_name_shows_in_place_of_the_project() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" tyler-1 | Working\x07");
+    pty.wait_for(b" tyler-1 | Working | nulspace-io\x07");
 
     run_hook(
         &pty.slave_path,
