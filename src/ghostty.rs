@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn titles_are_sent_as_unicode_data() {
-        for title in ["⠋ Working | 漢字", "✳ Ready | \"quoted\" \\ path", ""] {
+        for title in ["⠋ 漢字 | Working", "✳ \"quoted\" \\ path | Ready", ""] {
             assert_eq!(Desc::text(title).unwrap().string().unwrap(), title);
         }
     }

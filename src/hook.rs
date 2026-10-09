@@ -425,7 +425,10 @@ mod tests {
     fn a_dialog_closes_when_its_tool_completes() {
         let open = requested("", "Bash", &bash("make"), &[]);
         assert_eq!(open.len(), 1);
-        assert!(open_dialogs("PostToolUse", "", "Bash", &bash("make"), &open).is_empty());
+        assert_eq!(
+            open_dialogs("PostToolUse", "", "Bash", &bash("make"), &open),
+            Vec::<Dialog>::new()
+        );
     }
 
     #[test]
@@ -449,7 +452,10 @@ mod tests {
             "questions": [{ "question": "Deploy?" }],
             "answers": { "Deploy?": "Yes" },
         });
-        assert!(open_dialogs("PostToolUse", "", "AskUserQuestion", &answered, &open).is_empty());
+        assert_eq!(
+            open_dialogs("PostToolUse", "", "AskUserQuestion", &answered, &open),
+            Vec::<Dialog>::new()
+        );
     }
 
     #[test]
@@ -459,7 +465,10 @@ mod tests {
             open_dialogs("PostToolUse", "", "Bash", &bash("make"), &open),
             open
         );
-        assert!(open_dialogs("PostToolUse", "worker", "Bash", &bash("make"), &open).is_empty());
+        assert_eq!(
+            open_dialogs("PostToolUse", "worker", "Bash", &bash("make"), &open),
+            Vec::<Dialog>::new()
+        );
     }
 
     #[test]
@@ -473,7 +482,10 @@ mod tests {
     #[test]
     fn a_stopped_subagent_leaves_no_dialog_behind() {
         let open = requested("worker", "Bash", &bash("make"), &[]);
-        assert!(open_dialogs("SubagentStop", "worker", "", &Value::Null, &open).is_empty());
+        assert_eq!(
+            open_dialogs("SubagentStop", "worker", "", &Value::Null, &open),
+            Vec::<Dialog>::new()
+        );
     }
 
     #[test]

@@ -131,14 +131,14 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    if tty.write(&format!("{} Working | {}", FRAMES[frame], label))? {
+                    if tty.write(&format!("{} {} | Working", FRAMES[frame], label))? {
                         frame = (frame + 1) % FRAMES.len();
                     }
                 }
                 StateKind::Idle | StateKind::Unknown => {
                     let title = (new_mode, label.to_string());
                     if static_title.as_ref() != Some(&title)
-                        && tty.write(&format!("✳ Ready | {label}"))?
+                        && tty.write(&format!("✳ {label} | Ready"))?
                     {
                         static_title = Some(title);
                     }
@@ -146,7 +146,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 StateKind::Pending => {
                     let title = (StateKind::Pending, label.to_string());
                     if static_title.as_ref() != Some(&title)
-                        && tty.write(&format!("⧗ Waiting | {label}"))?
+                        && tty.write(&format!("⧗ {label} | Waiting"))?
                     {
                         static_title = Some(title);
                     }
@@ -154,7 +154,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 StateKind::Waiting => {
                     let title = (StateKind::Waiting, label.to_string());
                     if static_title.as_ref() != Some(&title)
-                        && tty.write(&format!("⚠ Action required | {label}"))?
+                        && tty.write(&format!("⚠ {label} | Action required"))?
                     {
                         static_title = Some(title);
                     }
@@ -184,7 +184,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     if set_idle_if_unchanged(state_path, &current)? {
                         let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        if tty.write(&format!("✳ Ready | {label}"))? {
+                        if tty.write(&format!("✳ {label} | Ready"))? {
                             static_title = Some((StateKind::Idle, label.to_string()));
                         }
                     } else {
@@ -248,7 +248,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
                         let label = title_label(&current.value);
                         mode = Some(StateKind::Idle);
-                        if tty.write(&format!("✳ Ready | {label}"))? {
+                        if tty.write(&format!("✳ {label} | Ready"))? {
                             static_title = Some((StateKind::Idle, label.to_string()));
                         }
                     }
