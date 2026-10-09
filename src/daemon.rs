@@ -288,9 +288,10 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
     Ok(())
 }
 
-// Many tabs in one project all read the same project name; when the user has
-// run /rename in the Claude Code CLI, that name is what distinguishes them, so
-// it leads and the project trails as context.
+// A name the user assigned with /rename outranks the status; the project is
+// context and trails. Claude Code 2.1.296 also writes a generated custom-title
+// when forking a conversation, and the record carries no source, so a fork's
+// generated name reads as assigned.
 fn title_text(state: &State, indicator: &str, status: &str) -> String {
     let project = &state.project;
     match state
@@ -299,7 +300,7 @@ fn title_text(state: &State, indicator: &str, status: &str) -> String {
         .filter(|name| !name.is_empty())
     {
         Some(name) => format!("{indicator} {name} | {status} | {project}"),
-        None => format!("{indicator} {project} | {status}"),
+        None => format!("{indicator} {status} | {project}"),
     }
 }
 

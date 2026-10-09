@@ -127,7 +127,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
         first_claude.0.id(),
         r#"{"hook_event_name":"SessionStart","cwd":"/tmp/example"}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 example | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
     run_hook(
         &pty.slave_path,
@@ -137,7 +137,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" example | Working\x07");
+    pty.wait_for(b" Working | example\x07");
     let old_marker_output = pty.read_for(Duration::from_millis(650));
     assert!(!contains(&old_marker_output, b"\xe2\x9c\xb3 Ready"));
 
@@ -162,7 +162,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
         first_claude.0.id(),
         r#"{"hook_event_name":"Notification","cwd":"/tmp/example"}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 example | Action required\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
 
     // A tool running alongside the open dialog finishes without clearing it.
     run_hook(
@@ -171,7 +171,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
         r#"{"hook_event_name":"PostToolUse","cwd":"/tmp/example","tool_name":"Read"}"#,
     );
     let sibling_output = pty.read_for(Duration::from_millis(650));
-    assert!(!contains(&sibling_output, b" example | Working"));
+    assert!(!contains(&sibling_output, b" Working | example"));
 
     run_hook(
         &pty.slave_path,
@@ -180,7 +180,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
             r#"{{"hook_event_name":"PostToolUse","cwd":"/tmp/example","tool_name":"AskUserQuestion","tool_input":{ANSWERED_QUESTION}}}"#
         ),
     );
-    pty.wait_for(b" example | Working\x07");
+    pty.wait_for(b" Working | example\x07");
 
     // The dialog's notification can be a beat slower than the answer that
     // closed it, and must not put the title back on a session that moved on.
@@ -196,7 +196,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
     ));
 
     append_records(&transcript, &[INTERRUPT_RECORD]);
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 example | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
     run_hook(
         &pty.slave_path,
@@ -206,7 +206,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" example | Working\x07");
+    pty.wait_for(b" Working | example\x07");
 
     // Escape with a queued message flushes the abandoned turn after the prompt
     // hook has read the transcript length, so the interrupt lands past the
@@ -220,10 +220,10 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
         first_claude.0.id(),
         r#"{"hook_event_name":"Notification","cwd":"/tmp/example","message":"Claude needs your permission to use Bash"}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 example | Action required\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | example\x07");
 
     append_records(&transcript, &[INTERRUPT_RECORD]);
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 example | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | example\x07");
 
     run_hook(
         &pty.slave_path,
@@ -240,7 +240,7 @@ fn hook_flow_updates_the_title_and_hands_off_cleanly() {
         second_claude.0.id(),
         r#"{"hook_event_name":"SessionStart","cwd":"/tmp/second"}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 second | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | second\x07");
 
     run_hook(
         &pty.slave_path,
@@ -271,11 +271,11 @@ fn a_subagents_answered_dialog_releases_the_title() {
     let dialog_raised = r#"{"hook_event_name":"Notification","cwd":"/tmp/lead","notification_type":"permission_prompt"}"#;
 
     run_hook(&pty.slave_path, claude.0.id(), background_subagent);
-    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 lead | Waiting\x07");
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | lead\x07");
 
     run_hook(&pty.slave_path, claude.0.id(), &worker_asks);
     run_hook(&pty.slave_path, claude.0.id(), dialog_raised);
-    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 lead | Action required\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | lead\x07");
 
     // Approved, the subagent's tool completes and the lead goes back to
     // waiting on it.
@@ -286,19 +286,19 @@ fn a_subagents_answered_dialog_releases_the_title() {
             r#"{{"hook_event_name":"PostToolUse","agent_id":"worker","cwd":"/tmp/lead","tool_name":"Bash","tool_input":{WORKER_COMMAND}}}"#
         ),
     );
-    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 lead | Waiting\x07");
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | lead\x07");
 
     // The lead's own work does not answer a subagent's open dialog.
     run_hook(&pty.slave_path, claude.0.id(), &worker_asks);
     run_hook(&pty.slave_path, claude.0.id(), dialog_raised);
-    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 lead | Action required\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9a\xa0 Action required | lead\x07");
     run_hook(
         &pty.slave_path,
         claude.0.id(),
         r#"{"hook_event_name":"PreToolUse","cwd":"/tmp/lead","tool_name":"Read"}"#,
     );
     let lead_output = pty.read_for(Duration::from_millis(650));
-    assert!(!contains(&lead_output, b" lead | Working"));
+    assert!(!contains(&lead_output, b" Working | lead"));
 
     // Denied, the subagent's tool never completes, but its batch ends.
     run_hook(
@@ -306,7 +306,7 @@ fn a_subagents_answered_dialog_releases_the_title() {
         claude.0.id(),
         r#"{"hook_event_name":"PostToolBatch","agent_id":"worker","cwd":"/tmp/lead"}"#,
     );
-    pty.wait_for(b" lead | Working\x07");
+    pty.wait_for(b" Working | lead\x07");
 
     run_hook(
         &pty.slave_path,
@@ -334,14 +334,14 @@ fn stop_with_pending_background_tasks_shows_waiting() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" pause | Working\x07");
+    pty.wait_for(b" Working | pause\x07");
 
     run_hook(
         &pty.slave_path,
         claude.0.id(),
         r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"sleep","command":"sleep 5"}]}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 pause | Waiting\x07");
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | pause\x07");
 
     run_hook(
         &pty.slave_path,
@@ -351,14 +351,14 @@ fn stop_with_pending_background_tasks_shows_waiting() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" pause | Working\x07");
+    pty.wait_for(b" Working | pause\x07");
 
     run_hook(
         &pty.slave_path,
         claude.0.id(),
         r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"d1","type":"dream","status":"running","description":"dreaming"},{"id":"a1","type":"auto-mode scan","status":"running","description":"scanning"},{"id":"t1","type":"teammate","status":"running","description":"resting"},{"id":"n1","type":"novel_chore","status":"running","description":"future work"}]}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 pause | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | pause\x07");
 
     run_hook(
         &pty.slave_path,
@@ -368,14 +368,14 @@ fn stop_with_pending_background_tasks_shows_waiting() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" pause | Working\x07");
+    pty.wait_for(b" Working | pause\x07");
 
     run_hook(
         &pty.slave_path,
         claude.0.id(),
         r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"a2","type":"subagent","status":"running","description":"explore","agent_type":"Explore"}]}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 pause | Waiting\x07");
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | pause\x07");
 
     run_hook(
         &pty.slave_path,
@@ -427,7 +427,7 @@ fn serving_and_killed_shells_release_the_waiting_title() {
         serde_json::to_string(&transcript).unwrap()
     );
     run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
-    pty.wait_for(b" serve | Working\x07");
+    pty.wait_for(b" Working | serve\x07");
 
     run_hook_with_tasks_root(
         &pty.slave_path,
@@ -435,10 +435,10 @@ fn serving_and_killed_shells_release_the_waiting_title() {
         r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t1serve","type":"shell","status":"running","description":"dev server","command":"npm run dev"}]}"#,
         &tasks_root,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 serve | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07");
 
     run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
-    pty.wait_for(b" serve | Working\x07");
+    pty.wait_for(b" Working | serve\x07");
 
     run_hook_with_tasks_root(
         &pty.slave_path,
@@ -446,18 +446,18 @@ fn serving_and_killed_shells_release_the_waiting_title() {
         r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t2work","type":"shell","status":"running","description":"long task","command":"sleep 45"}]}"#,
         &tasks_root,
     );
-    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 serve | Waiting\x07");
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | serve\x07");
 
     // A task-list kill fires no wake; the re-probe must release the title.
     worker.0.kill().unwrap();
     worker.0.wait().unwrap();
     pty.wait_for_within(
-        b"\x1b]0;\xe2\x9c\xb3 serve | Ready\x07",
+        b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07",
         Duration::from_secs(12),
     );
 
     run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
-    pty.wait_for(b" serve | Working\x07");
+    pty.wait_for(b" Working | serve\x07");
 
     // A shell already dead at Stop never enters the waiting state at all.
     run_hook_with_tasks_root(
@@ -466,7 +466,7 @@ fn serving_and_killed_shells_release_the_waiting_title() {
         r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t2work","type":"shell","status":"running","description":"long task","command":"sleep 45"}]}"#,
         &tasks_root,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 serve | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07");
 
     // A server that binds only after the turn ends: released by the re-probe.
     let late = ChildGuard(
@@ -482,16 +482,16 @@ fn serving_and_killed_shells_release_the_waiting_title() {
             .unwrap(),
     );
     run_hook_with_tasks_root(&pty.slave_path, claude.0.id(), &prompt, &tasks_root);
-    pty.wait_for(b" serve | Working\x07");
+    pty.wait_for(b" Working | serve\x07");
     run_hook_with_tasks_root(
         &pty.slave_path,
         claude.0.id(),
         r#"{"hook_event_name":"Stop","session_id":"session","cwd":"/tmp/serve","background_tasks":[{"id":"t3late","type":"shell","status":"running","description":"slow server","command":"npm run dev"}]}"#,
         &tasks_root,
     );
-    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 serve | Waiting\x07");
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | serve\x07");
     pty.wait_for_within(
-        b"\x1b]0;\xe2\x9c\xb3 serve | Ready\x07",
+        b"\x1b]0;\xe2\x9c\xb3 Ready | serve\x07",
         Duration::from_secs(20),
     );
 
@@ -624,7 +624,7 @@ fn a_daemon_steps_aside_when_the_binary_is_replaced() {
         .write_all(br#"{"hook_event_name":"SessionStart","cwd":"/tmp/upgrade"}"#)
         .unwrap();
     assert!(child.wait().unwrap().success());
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 upgrade | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | upgrade\x07");
 
     let paths = state::paths_for_tty(&pty.slave_path).unwrap();
     assert!(paths.lock.exists());
@@ -754,7 +754,7 @@ fn subagent_hooks_do_not_overwrite_the_main_session_title() {
         claude.0.id(),
         r#"{"hook_event_name":"SessionStart","cwd":"/tmp/main"}"#,
     );
-    pty.wait_for(b"main | Ready");
+    pty.wait_for(b"Ready | main");
     let paths = state::paths_for_tty(&pty.slave_path).unwrap();
     let before = state::read(&paths.state).unwrap().unwrap().raw;
     for event in ["PreToolUse", "PostToolUse", "PostToolBatch"] {
@@ -847,7 +847,7 @@ fn a_title_never_lands_inside_another_writers_escape_sequence() {
             serde_json::to_string(&transcript).unwrap()
         ),
     );
-    pty.wait_for(b" frames | Working\x07");
+    pty.wait_for(b" Working | frames\x07");
 
     let mut slave = OpenOptions::new()
         .write(true)
@@ -897,7 +897,7 @@ fn a_title_never_lands_inside_another_writers_escape_sequence() {
         "titles landed inside escape sequences: {split_titles:?}"
     );
 
-    pty.wait_for(b" frames | Working\x07");
+    pty.wait_for(b" Working | frames\x07");
     run_hook(
         &pty.slave_path,
         claude.0.id(),
@@ -1071,15 +1071,11 @@ fn sequence_breaks(output: &[u8]) -> Vec<String> {
         let title = text.strip_prefix("0;");
         let daemon_title = title.is_some_and(|title| {
             title.is_empty()
-                || [
-                    "✳ fuzz | Ready",
-                    "⧗ fuzz | Waiting",
-                    "⚠ fuzz | Action required",
-                ]
-                .contains(&title)
-                || FRAMES
-                    .iter()
-                    .any(|frame| title == format!("{frame} fuzz | Working"))
+                || title.ends_with(" | fuzz")
+                    && (title.starts_with("✳ Ready")
+                        || title.starts_with("⧗ Waiting")
+                        || title.starts_with("⚠ Action required")
+                        || FRAMES.iter().any(|frame| title.starts_with(frame)))
         });
         let app_sequence =
             title.is_some_and(|title| title.starts_with("app frame ")) || text.starts_with("8;;");
@@ -1110,7 +1106,7 @@ fn a_title_never_interrupts_any_terminal_sequence() {
     let shell_left_running = r#"{"hook_event_name":"Stop","cwd":"/tmp/fuzz","background_tasks":[{"id":"b1","type":"shell","status":"running","description":"sleep","command":"sleep 5"}]}"#;
 
     run_hook(&pty.slave_path, claude.0.id(), &prompt);
-    pty.wait_for(b" fuzz | Working\x07");
+    pty.wait_for(b" Working | fuzz\x07");
 
     let mut output = Vec::new();
     for seed in [
@@ -1150,7 +1146,8 @@ fn a_title_never_interrupts_any_terminal_sequence() {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut slow = true;
         while Instant::now() < deadline
-            && (output.len() - seed_start < 50_000 || count(&output[seed_start..], b" fuzz | ") < 2)
+            && (output.len() - seed_start < 50_000
+                || count(&output[seed_start..], b" | fuzz\x07") < 2)
         {
             output.extend(if slow {
                 pty.read_slowly_for(Duration::from_millis(100))
@@ -1179,7 +1176,7 @@ fn a_title_never_interrupts_any_terminal_sequence() {
     );
     assert!(count(&output, b"\x1b]0;app frame ") >= 20);
     assert!(count(&output, b"\x1b]8;;") >= 20);
-    let daemon_titles = count(&output, b" fuzz | ");
+    let daemon_titles = count(&output, b" | fuzz\x07");
     assert!(
         daemon_titles >= 3,
         "only {daemon_titles} daemon titles landed during the flood"
@@ -1190,7 +1187,7 @@ fn a_title_never_interrupts_any_terminal_sequence() {
         claude.0.id(),
         r#"{"hook_event_name":"Stop","cwd":"/tmp/fuzz"}"#,
     );
-    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 fuzz | Ready\x07");
+    pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07");
     run_hook(
         &pty.slave_path,
         claude.0.id(),
@@ -1203,12 +1200,12 @@ fn a_title_never_interrupts_any_terminal_sequence() {
 
 #[test]
 fn the_parser_flags_titles_that_cut_sequences_and_characters() {
-    let inside_color = b"\x1b[38;2;7\x1b]0;\xe2\xa0\xb8 fuzz | Working\x078;186;101m";
+    let inside_color = b"\x1b[38;2;7\x1b]0;\xe2\xa0\xb8 Working | fuzz\x078;186;101m";
     assert_eq!(sequence_breaks(inside_color).len(), 1);
-    let inside_glyph = b"\xe2\x96\x1b]0;\xe2\x9c\xb3 fuzz | Ready\x07\x93";
+    let inside_glyph = b"\xe2\x96\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07\x93";
     assert_eq!(sequence_breaks(inside_glyph).len(), 1);
-    let inside_link = b"\x1b]8;;https://a\x1b]0;\xe2\x9c\xb3 fuzz | Ready\x07\x07";
+    let inside_link = b"\x1b]8;;https://a\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07\x07";
     assert_eq!(sequence_breaks(inside_link).len(), 1);
-    let clean = b"\x1b[38;2;7;8;9m\xe2\x96\x93\x1b]0;\xe2\x9c\xb3 fuzz | Ready\x07\x1b]8;;x\x1b\\y\x1b]0;app frame 1\x07";
+    let clean = b"\x1b[38;2;7;8;9m\xe2\x96\x93\x1b]0;\xe2\x9c\xb3 Ready | fuzz\x07\x1b]8;;x\x1b\\y\x1b]0;app frame 1\x07";
     assert_eq!(sequence_breaks(clean), Vec::<String>::new());
 }

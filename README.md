@@ -2,13 +2,13 @@
 
 Show Claude Code's status in the terminal tab title:
 
-- `⠋ project | Working` while Claude works
-- `✳ project | Ready` when Claude finishes
-- `⧗ project | Waiting` while Claude waits for background tasks
-- `⚠ project | Action required` when Claude needs approval
+- `⠋ Working | project` while Claude works
+- `✳ Ready | project` when Claude finishes
+- `⧗ Waiting | project` while Claude waits for background tasks
+- `⚠ Action required | project` when Claude needs approval
 
-A session named with `/rename` leads with its name and keeps the project at
-the end: `⠋ name | Working | project`.
+A name you give the session with `/rename` comes before the status:
+`⠋ name | Working | project`.
 
 The spinner animates so a busy tab stands out in the tab bar. Background
 shells that run until killed (dev servers, local stacks, log tails) do not
