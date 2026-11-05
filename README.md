@@ -11,8 +11,9 @@ A name you give the session with `/rename` comes before the status:
 `⠋ name | Working | project`.
 
 The spinner animates so a busy tab stands out in the tab bar. Background
-shells that run until killed (dev servers, local stacks, log tails) do not
-hold the waiting title. No configuration.
+shells that run until killed (dev servers, local stacks, log tails) and the
+watchers Claude Code keeps on published artifacts do not hold the waiting
+title. No configuration.
 
 ## Install
 

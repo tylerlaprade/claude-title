@@ -356,9 +356,26 @@ fn stop_with_pending_background_tasks_shows_waiting() {
     run_hook(
         &pty.slave_path,
         claude.0.id(),
-        r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"d1","type":"dream","status":"running","description":"dreaming"},{"id":"a1","type":"auto-mode scan","status":"running","description":"scanning"},{"id":"t1","type":"teammate","status":"running","description":"resting"},{"id":"n1","type":"novel_chore","status":"running","description":"future work"}]}"#,
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"d1","type":"dream","status":"running","description":"dreaming"},{"id":"a1","type":"auto-mode scan","status":"running","description":"scanning"},{"id":"t1","type":"teammate","status":"running","description":"resting"},{"id":"n1","type":"novel_chore","status":"running","description":"future work"},{"id":"m1","type":"monitor","status":"running","description":"live updates for artifact https://claude.ai/artifact/abc (auto-armed on publish)"},{"id":"m2","type":"monitor","status":"running","description":"presence on artifact https://claude.ai/artifact/abc"}]}"#,
     );
     pty.wait_for(b"\x1b]0;\xe2\x9c\xb3 Ready | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        &format!(
+            r#"{{"hook_event_name":"UserPromptSubmit","cwd":"/tmp/pause","transcript_path":{}}}"#,
+            serde_json::to_string(&transcript).unwrap()
+        ),
+    );
+    pty.wait_for(b" Working | pause\x07");
+
+    run_hook(
+        &pty.slave_path,
+        claude.0.id(),
+        r#"{"hook_event_name":"Stop","cwd":"/tmp/pause","background_tasks":[{"id":"m3","type":"monitor","status":"running","description":"deploy socket"}]}"#,
+    );
+    pty.wait_for(b"\x1b]0;\xe2\xa7\x97 Waiting | pause\x07");
 
     run_hook(
         &pty.slave_path,

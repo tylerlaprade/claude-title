@@ -32,6 +32,8 @@ struct BackgroundTask {
     kind: String,
     #[serde(default)]
     id: String,
+    #[serde(default)]
+    description: String,
 }
 
 pub fn run() -> Result<()> {
@@ -179,11 +181,9 @@ pub fn run() -> Result<()> {
 // session. Unrecognized kinds also fall through to Ready. Shells are probed
 // by task id: one that runs until killed — a dev server holding a listening
 // socket, a bare log tail — never wakes the session, while the rest are
-// awaited work the daemon keeps re-probing during the pause. "monitor"
-// counts on the assumption every monitor fires or times out; an upstream
-// flag (dormant in 2.1.221) would auto-arm never-ending ambient monitors on
-// artifact publishes, and if a session pins on Waiting after publishing an
-// artifact, that flag has shipped and "monitor" needs a second look.
+// awaited work the daemon keeps re-probing during the pause. A "monitor" is
+// awaited because it fires or times out, unless it is one of the session-long
+// sockets Claude Code holds open on a published artifact.
 fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (bool, Vec<String>) {
     let mut beyond_shells = false;
     let mut shells = Vec::new();
@@ -192,6 +192,7 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
             // A shell with no id can never be probed, so it must not hold a
             // title nothing could clear.
             "shell" if !task.id.is_empty() => shells.push(task.id.clone()),
+            "monitor" if is_artifact_watch(&task.description) => {}
             "subagent" | "workflow" | "monitor" | "MCP task" => beyond_shells = true,
             _ => {}
         }
@@ -211,6 +212,14 @@ fn classify_background_tasks(session_id: &str, tasks: &[BackgroundTask]) -> (boo
             .collect();
     }
     (beyond_shells, shells)
+}
+
+// Claude Code marks these sockets `ambient` and leaves them out of its own
+// lists of work in progress, but as of 2.1.318 Stop reports them as a plain
+// "monitor" without that mark, so their descriptions are the only signal.
+fn is_artifact_watch(description: &str) -> bool {
+    description.starts_with("live updates for artifact ")
+        || description.starts_with("presence on artifact ")
 }
 
 // Claude Code arms a dialog's notification on a timer. Answer the dialog just
