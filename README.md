@@ -51,18 +51,15 @@ macOS may request Automation access on first use. Title updates target an
 existing Ghostty process and never reopen the app after you quit it. Rex
 (control API revision 11 or later) shows the title as the tab's label, set
 through the Rex server's socket, so title updates stay out of terminal output
-there too. A Rex label is the session's name alone, or the project when the
-session has none, because Rex marks the tab's status itself and each label
-change costs the Rex app about 40 ms of CPU. Rex draws those marks, a
-spinner on a working tab among them, from the program status its terminal
-received (OSC 7501).
-Claude Code reports that status when its terminal titles are on and Rex
-answered its startup query; otherwise claude-title reports it, with one short
-write into the terminal per status change: working, blocked while Claude needs
-approval, done when a turn finishes, idle after an interrupt. Those writes
-broke no line of a 400-line reply during 3,012 of them, but output that keeps
-the terminal's queue full, which Claude Code's drawing did not, can be split
-by one. A Rex tab split into panes keeps its own label, a name you give the
+there too. Rex marks a tab's status itself, with a spinner on a working tab,
+from the program status Claude Code reports in its terminal (OSC 7501). Claude
+Code reports when its terminal titles are on, so not with
+`CLAUDE_CODE_DISABLE_TERMINAL_TITLE` set, and when Rex answered its one startup
+query within two seconds. The label of a session that reports is its name
+alone, or the project when it has none. A session that does not report keeps
+its status in the label, without a spinner: each label change costs the Rex
+app about 40 ms of CPU, and nothing but Claude Code writes into the terminal
+it draws in. A Rex tab split into panes keeps its own label, a name you give the
 tab while Claude Code runs there stays, and the tab's earlier label returns
 when the session ends. A Rex session that cannot reach its server shows no
 title rather than write one into the terminal. Other terminals use OSC 0 with a

@@ -18,15 +18,6 @@ pub(crate) enum TerminalTitle {
     Rex(Box<crate::rex::Connection>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProgramStatus {
-    Idle,
-    Working,
-    Blocked,
-    Done,
-    Cleared,
-}
-
 #[derive(Debug)]
 pub(crate) struct TerminalDetached;
 
@@ -50,36 +41,33 @@ impl TerminalTitle {
                 let _ = ghostty;
             }
             Ok("rex") => {
-                return crate::rex::Connection::open(
-                    owner,
-                    &state.with_extension("rex.json"),
-                    open_terminal(tty)?,
-                )
-                .map(|connection| Self::Rex(Box::new(connection)));
+                return crate::rex::Connection::open(owner, &state.with_extension("rex.json"))
+                    .map(|connection| Self::Rex(Box::new(connection)));
             }
             _ => {}
         }
         open_terminal(tty).map(Self::Osc)
     }
 
-    // Rex marks a tab itself from the reported program status: a spinner while
-    // working, a symbol while blocked, a dot when done. A label repeating that
-    // would cost the Rex app about 40 ms of CPU for every change.
+    // Rex marks a tab itself from the program status Claude Code reported: a
+    // spinner while working, a symbol while blocked, a dot when done.
     pub(crate) fn marks_status(&self) -> bool {
         match self {
             Self::Osc(_) => false,
             #[cfg(target_os = "macos")]
             Self::Ghostty(_) => false,
-            Self::Rex(_) => true,
+            Self::Rex(connection) => connection.claude_reports(),
         }
     }
 
-    pub(crate) fn report(&mut self, status: ProgramStatus) -> Result<()> {
+    // Every Rex label change costs the Rex app about 40 ms of CPU, so a Rex
+    // label changes only with the status.
+    pub(crate) fn animates_title(&self) -> bool {
         match self {
-            Self::Osc(_) => Ok(()),
+            Self::Osc(_) => true,
             #[cfg(target_os = "macos")]
-            Self::Ghostty(_) => Ok(()),
-            Self::Rex(connection) => connection.report(status),
+            Self::Ghostty(_) => true,
+            Self::Rex(_) => false,
         }
     }
 
