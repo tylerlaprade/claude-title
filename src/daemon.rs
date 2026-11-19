@@ -1,6 +1,6 @@
 use crate::probe;
-use crate::state::{self, State, StateKind, StoredState};
-use crate::title::TerminalTitle;
+use crate::state::{self, StateKind, StoredState};
+use crate::title::{TerminalTitle, state_title, title_text};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::env;
@@ -16,8 +16,6 @@ const INTERRUPT_MARKER: &[u8] =
     b"\"content\":[{\"type\":\"text\",\"text\":\"[Request interrupted by user";
 const USER_RECORD: &[u8] = b"\"type\":\"user\"";
 const SHELL_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-const OUTPUT_SETTLE_PATIENCE: Duration = Duration::from_millis(50);
-const EXIT_CLEAR_PATIENCE: Duration = Duration::from_secs(2);
 const LOOP_PAUSE: Duration = Duration::from_millis(100);
 
 // A shell that vanishes after finishing wakes the session within a beat, and
@@ -128,47 +126,15 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 }
             }
 
-            match new_mode {
-                StateKind::Busy => {
-                    static_title = None;
-                    let title = title_text(
-                        tty.marks_status(),
-                        &current.value,
-                        tty.animates_title().then(|| FRAMES[frame]),
-                        "Working",
-                    );
-                    if tty.write(&title)? {
-                        frame = (frame + 1) % FRAMES.len();
-                    }
-                }
-                StateKind::Idle | StateKind::Unknown => {
-                    let title = title_text(tty.marks_status(), &current.value, Some("✳"), "Ready");
-                    if static_title.as_ref() != Some(&title) && tty.write(&title)? {
-                        static_title = Some(title);
-                    }
-                }
-                StateKind::Pending => {
-                    let title =
-                        title_text(tty.marks_status(), &current.value, Some("⧗"), "Waiting");
-                    if static_title.as_ref() != Some(&title) && tty.write(&title)? {
-                        static_title = Some(title);
-                    }
-                }
-                StateKind::Waiting => {
-                    let title = title_text(
-                        tty.marks_status(),
-                        &current.value,
-                        Some("⚠"),
-                        "Action required",
-                    );
-                    if static_title.as_ref() != Some(&title) && tty.write(&title)? {
-                        static_title = Some(title);
-                    }
-                }
-                StateKind::End => {
-                    if static_title.as_deref() != Some("") && tty.write("")? {
-                        static_title = Some(String::new());
-                    }
+            if new_mode == StateKind::Busy && tty.animates_title() {
+                static_title = None;
+                tty.write(&state_title(false, &current.value, Some(FRAMES[frame])))?;
+                frame = (frame + 1) % FRAMES.len();
+            } else {
+                let title = state_title(tty.marks_status(), &current.value, None);
+                if static_title.as_ref() != Some(&title) {
+                    tty.write(&title)?;
+                    static_title = Some(title);
                 }
             }
 
@@ -190,9 +156,8 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                         let title =
                             title_text(tty.marks_status(), &current.value, Some("✳"), "Ready");
                         mode = Some(StateKind::Idle);
-                        if tty.write(&title)? {
-                            static_title = Some(title);
-                        }
+                        tty.write_between_hooks(&title)?;
+                        static_title = Some(title);
                     } else {
                         transcript_position = transcript_start;
                         transcript_interrupted = false;
@@ -255,9 +220,8 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                         let title =
                             title_text(tty.marks_status(), &current.value, Some("✳"), "Ready");
                         mode = Some(StateKind::Idle);
-                        if tty.write(&title)? {
-                            static_title = Some(title);
-                        }
+                        tty.write_between_hooks(&title)?;
+                        static_title = Some(title);
                     }
                 }
             } else {
@@ -289,10 +253,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     }
                 }
             } else {
-                let deadline = Instant::now() + EXIT_CLEAR_PATIENCE;
-                while !tty.write("")? && Instant::now() < deadline {
-                    thread::sleep(OUTPUT_SETTLE_PATIENCE);
-                }
+                tty.write("")?;
                 break;
             }
             last_liveness_check = now;
@@ -302,29 +263,6 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
         thread::sleep(LOOP_PAUSE);
     }
     Ok(())
-}
-
-// A name the user assigned with /rename outranks the status; the project is
-// context and trails. Claude Code 2.1.296 also writes a generated custom-title
-// when forking a conversation, and the record carries no source, so a fork's
-// generated name reads as assigned.
-fn title_text(status_marked: bool, state: &State, indicator: Option<&str>, status: &str) -> String {
-    let project = &state.project;
-    let name = state
-        .custom_title
-        .as_deref()
-        .filter(|name| !name.is_empty());
-    if status_marked {
-        return name.unwrap_or(project).to_owned();
-    }
-    let fields = match name {
-        Some(name) => format!("{name} | {status} | {project}"),
-        None => format!("{status} | {project}"),
-    };
-    match indicator {
-        Some(indicator) => format!("{indicator} {fields}"),
-        None => fields,
-    }
 }
 
 fn executable_signature() -> Option<(u64, u64)> {
@@ -426,42 +364,6 @@ fn open_lock(path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn session(custom_title: Option<&str>) -> State {
-        State {
-            kind: StateKind::Busy,
-            activity: StateKind::Busy,
-            epoch: 0,
-            claude_pid: 1,
-            project: "app".to_owned(),
-            custom_title: custom_title.map(str::to_owned),
-            title_scan: crate::session_title::SessionTitle::default(),
-            transcript_path: None,
-            transcript_offset: 0,
-            dialogs: Vec::new(),
-            resolved_dialog: false,
-            pending_session: String::new(),
-            pending_shells: Vec::new(),
-            pending_beyond_shells: false,
-        }
-    }
-
-    #[test]
-    fn a_terminal_that_marks_status_is_titled_with_the_name_alone() {
-        assert_eq!(
-            title_text(true, &session(Some("Fix")), None, "Working"),
-            "Fix"
-        );
-        assert_eq!(title_text(true, &session(None), None, "Working"), "app");
-        assert_eq!(
-            title_text(false, &session(Some("Fix")), Some("⠋"), "Working"),
-            "⠋ Fix | Working | app"
-        );
-        assert_eq!(
-            title_text(false, &session(None), None, "Working"),
-            "Working | app"
-        );
-    }
 
     #[test]
     fn title_startup_recovers_without_another_hook() {

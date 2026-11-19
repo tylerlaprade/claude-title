@@ -10,7 +10,8 @@ Show Claude Code's status in the terminal tab title:
 A name you give the session with `/rename` comes before the status:
 `⠋ name | Working | project`.
 
-The spinner animates so a busy tab stands out in the tab bar. Background
+In Ghostty the spinner animates so a busy tab stands out in the tab bar;
+elsewhere the working title is `Working | project`. Background
 shells that run until killed (dev servers, local stacks, log tails) and the
 watchers Claude Code keeps on published artifacts do not hold the waiting
 title. No configuration.
@@ -28,7 +29,8 @@ claude-title install
 ```
 
 Restart Claude Code. The installer adds hooks pinned to the binary's absolute
-path (rerun `claude-title install` if you move it) and sets
+path (rerun `claude-title install` if you move it, and once after upgrading
+from 0.1.20 or earlier) and sets
 `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` in `~/.claude/settings.json`.
 [Releases](https://github.com/tylerlaprade/claude-title/releases) carry
 attested binaries; verify with `gh attestation verify`.
@@ -62,8 +64,13 @@ app about 40 ms of CPU, and nothing but Claude Code writes into the terminal
 it draws in. A Rex tab split into panes keeps its own label, a name you give the
 tab while Claude Code runs there stays, and the tab's earlier label returns
 when the session ends. A Rex session that cannot reach its server shows no
-title rather than write one into the terminal. Other terminals use OSC 0 with a
-best-effort output queue check. Shell probing needs
+title rather than write one into the terminal. In every other terminal Claude
+Code writes the title itself (checked with Claude Code 2.1.328): each hook hands it
+the title as an OSC 0 sequence, and it writes that in order with its own
+output, so a title cannot land inside a character or an escape sequence. A
+change with no hook behind it, such as an interrupt, reaches the title through
+a file Claude Code watches, about a second later. claude-title itself writes
+nothing into the terminal. Shell probing needs
 `lsof` (preinstalled on macOS). A
 `docker compose up` stack listens outside the shell's process tree, so it
 holds the waiting title.

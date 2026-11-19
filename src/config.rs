@@ -23,7 +23,7 @@ const OWN_COMMANDS: [&str; 7] = [
 // long tool that you already approved from one whose dialog is still waiting.
 // Matchers rely on Claude Code's exact-name list syntax; characters outside
 // [a-zA-Z0-9_|, -] silently switch matching to an unanchored regex.
-const HOOKS: [(&str, Option<&str>); 12] = [
+const HOOKS: [(&str, Option<&str>); 13] = [
     ("SessionStart", Some("startup|resume|clear")),
     ("UserPromptSubmit", None),
     ("PreToolUse", None),
@@ -36,6 +36,9 @@ const HOOKS: [(&str, Option<&str>); 12] = [
     ("StopFailure", None),
     ("Notification", Some("permission_prompt")),
     ("SessionEnd", None),
+    // Fires for the file SessionStart asks Claude Code to watch, which the
+    // daemon changes when a title is due with no other hook behind it.
+    ("FileChanged", None),
 ];
 
 #[derive(Deserialize, Serialize)]
@@ -66,6 +69,24 @@ pub fn uninstall_default() -> Result<()> {
         if changed { "updated" } else { "not present" }
     );
     Ok(())
+}
+
+#[must_use]
+pub fn hook_installed(event: &str) -> bool {
+    settings_path()
+        .and_then(|path| read_settings(&path))
+        .is_ok_and(|root| has_own_hook(&root, event))
+}
+
+fn has_own_hook(root: &Value, event: &str) -> bool {
+    root["hooks"][event].as_array().is_some_and(|groups| {
+        groups
+            .iter()
+            .filter_map(|group| group["hooks"].as_array())
+            .flatten()
+            .filter_map(|hook| hook["command"].as_str())
+            .any(is_own_command)
+    })
 }
 
 pub fn install(path: &Path) -> Result<bool> {

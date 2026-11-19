@@ -3,7 +3,7 @@ use crate::state::{self, Dialog, State, StateKind};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -43,6 +43,9 @@ pub fn run() -> Result<()> {
 
     let input: HookInput = serde_json::from_reader(io::stdin()).unwrap_or_default();
     let event = input.hook_event_name.as_deref().unwrap_or("");
+    if event == "FileChanged" {
+        return hand_claude_the_title();
+    }
     let agent = input.agent_id.as_deref().unwrap_or("");
     // Subagents share the main thread's dialogs but never its activity.
     let event_activity = if agent.is_empty() {
@@ -166,9 +169,47 @@ pub fn run() -> Result<()> {
     };
     state::write(&paths.state, &value)?;
     drop(state_lock);
+    if crate::title::written_by_claude() {
+        let mut output = title_output(&value);
+        if event == "SessionStart" {
+            output["hookSpecificOutput"] = json!({
+                "hookEventName": event,
+                "watchPaths": [crate::title::nudge_path(&paths.state)],
+            });
+            if !crate::config::hook_installed("FileChanged") {
+                output["systemMessage"] = json!(
+                    "claude-title needs a new hook: run `claude-title install`, then restart Claude Code."
+                );
+            }
+        }
+        println!("{output}");
+    }
 
     if kind != StateKind::End && !daemon_running(&paths.lock)? {
         spawn_daemon(&tty, &paths.state, &paths.lock, claude_pid)?;
+    }
+    Ok(())
+}
+
+// Claude Code 2.1.328 writes a hook's terminalSequence itself, for OSC 0, 1, 2,
+// 9, 99 and 777 only, and does so with CLAUDE_CODE_DISABLE_TERMINAL_TITLE set.
+fn title_output(state: &State) -> Value {
+    let title = crate::title::state_title(false, state, None);
+    json!({
+        "terminalSequence": crate::title::title_sequence(&title),
+        "suppressOutput": true,
+    })
+}
+
+fn hand_claude_the_title() -> Result<()> {
+    if !crate::title::written_by_claude() {
+        return Ok(());
+    }
+    let Some(tty) = tty_for_pid(claude_pid()?)? else {
+        return Ok(());
+    };
+    if let Some(stored) = state::read(&state::paths_for_tty(&tty)?.state)? {
+        println!("{}", title_output(&stored.value));
     }
     Ok(())
 }
