@@ -62,15 +62,15 @@ impl TerminalTitle {
         open_terminal(tty).map(Self::Osc)
     }
 
-    // Every Rex label change costs the Rex app about 40 ms of CPU, so a Rex
-    // label changes only with the state and Rex animates the tab itself from
-    // the reported program status.
-    pub(crate) fn animates_title(&self) -> bool {
+    // Rex marks a tab itself from the reported program status: a spinner while
+    // working, a symbol while blocked, a dot when done. A label repeating that
+    // would cost the Rex app about 40 ms of CPU for every change.
+    pub(crate) fn marks_status(&self) -> bool {
         match self {
-            Self::Osc(_) => true,
+            Self::Osc(_) => false,
             #[cfg(target_os = "macos")]
-            Self::Ghostty(_) => true,
-            Self::Rex(_) => false,
+            Self::Ghostty(_) => false,
+            Self::Rex(_) => true,
         }
     }
 

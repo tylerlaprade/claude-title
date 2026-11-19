@@ -126,7 +126,7 @@ pub fn run() -> Result<()> {
         _ => project_name(input.cwd.as_deref()),
     };
     let is_prompt = event == "UserPromptSubmit";
-    let input_transcript = input.transcript_path.filter(|path| path.is_file());
+    let input_transcript = input.transcript_path.and_then(existing_transcript);
     let mut title_scan = previous
         .as_ref()
         .map(|value| value.title_scan.clone())
@@ -292,6 +292,21 @@ fn carries(completed: &Value, requested: &Value) -> bool {
             .all(|(field, value)| completed.get(field) == Some(value)),
         _ => completed == requested,
     }
+}
+
+// Claude Code 2.1.328 resuming a session from another folder names, at
+// SessionStart only, a transcript under the current folder's project; the
+// transcript stays in the project of the folder the session began in.
+fn existing_transcript(path: PathBuf) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path);
+    }
+    let transcript = path.file_name()?;
+    fs::read_dir(path.parent()?.parent()?)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|project| project.path().join(transcript))
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(test)]
@@ -542,6 +557,25 @@ mod tests {
     fn a_dialog_that_opens_off_a_settled_session_stands() {
         assert!(!is_stale_dialog(Some(&state(100, false)), 101));
         assert!(!is_stale_dialog(None, 101));
+    }
+
+    #[test]
+    fn a_session_resumed_from_another_folder_keeps_its_transcript() {
+        let projects = tempfile::tempdir().unwrap();
+        let began = projects.path().join("-began");
+        let resumed = projects.path().join("-resumed");
+        fs::create_dir_all(&began).unwrap();
+        fs::create_dir_all(resumed.join("session")).unwrap();
+        fs::write(began.join("session.jsonl"), "").unwrap();
+        assert_eq!(
+            existing_transcript(resumed.join("session.jsonl")),
+            Some(began.join("session.jsonl"))
+        );
+        assert_eq!(
+            existing_transcript(began.join("session.jsonl")),
+            Some(began.join("session.jsonl"))
+        );
+        assert_eq!(existing_transcript(resumed.join("fresh.jsonl")), None);
     }
 
     #[test]
