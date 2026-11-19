@@ -19,13 +19,12 @@ pub(crate) enum TerminalTitle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Spinner {
-    EveryFrame,
-    // Every Rex label change costs the Rex app about 40 ms of CPU, and changes
-    // that land together cost about as much as one, so every tab's spinner
-    // steps on the same wall-clock second.
-    EverySecond,
-    ByTerminal,
+pub(crate) enum ProgramStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Cleared,
 }
 
 #[derive(Debug)]
@@ -51,20 +50,36 @@ impl TerminalTitle {
                 let _ = ghostty;
             }
             Ok("rex") => {
-                return crate::rex::Connection::open(owner, &state.with_extension("rex.json"))
-                    .map(|connection| Self::Rex(Box::new(connection)));
+                return crate::rex::Connection::open(
+                    owner,
+                    &state.with_extension("rex.json"),
+                    open_terminal(tty)?,
+                )
+                .map(|connection| Self::Rex(Box::new(connection)));
             }
             _ => {}
         }
         open_terminal(tty).map(Self::Osc)
     }
 
-    pub(crate) fn spinner(&mut self) -> Result<Spinner> {
+    // Every Rex label change costs the Rex app about 40 ms of CPU, so a Rex
+    // label changes only with the state and Rex animates the tab itself from
+    // the reported program status.
+    pub(crate) fn animates_title(&self) -> bool {
         match self {
-            Self::Osc(_) => Ok(Spinner::EveryFrame),
+            Self::Osc(_) => true,
             #[cfg(target_os = "macos")]
-            Self::Ghostty(_) => Ok(Spinner::EveryFrame),
-            Self::Rex(connection) => connection.spinner(),
+            Self::Ghostty(_) => true,
+            Self::Rex(_) => false,
+        }
+    }
+
+    pub(crate) fn report(&mut self, status: ProgramStatus) -> Result<()> {
+        match self {
+            Self::Osc(_) => Ok(()),
+            #[cfg(target_os = "macos")]
+            Self::Ghostty(_) => Ok(()),
+            Self::Rex(connection) => connection.report(status),
         }
     }
 

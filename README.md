@@ -51,15 +51,16 @@ macOS may request Automation access on first use. Title updates target an
 existing Ghostty process and never reopen the app after you quit it. Rex
 (control API revision 11 or later) shows the title as the tab's label, set
 through the Rex server's socket, so title updates stay out of terminal output
-there too. Claude Code reports its own state to Rex, which then animates
-working tabs itself, unless `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` is set; the
-label then shows the status without a spinner. Otherwise the spinner steps once
-a second, in step across tabs: each label change costs the Rex app about 40 ms
-of CPU, and changes that land together cost about as much as one. To let Claude
-Code report in Rex while keeping its titles off elsewhere, move the variable
-from `~/.claude/settings.json` to your shell startup file, where
-`[ "$TERM_PROGRAM" = rex ] || export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` sets
-it outside Rex. A Rex tab split into panes keeps its own label, a name you give the
+there too. A Rex label carries no spinner and changes only with the status,
+because each label change costs the Rex app about 40 ms of CPU. Rex animates a
+working tab itself from the program status its terminal received (OSC 7501).
+Claude Code reports that status when its terminal titles are on and Rex
+answered its startup query; otherwise claude-title reports it, with one short
+write into the terminal per status change: working, blocked while Claude needs
+approval, done when a turn finishes, idle after an interrupt. Those writes
+broke no line of a 400-line reply during 3,012 of them, but output that keeps
+the terminal's queue full, which Claude Code's drawing did not, can be split
+by one. A Rex tab split into panes keeps its own label, a name you give the
 tab while Claude Code runs there stays, and the tab's earlier label returns
 when the session ends. A Rex session that cannot reach its server shows no
 title rather than write one into the terminal. Other terminals use OSC 0 with a

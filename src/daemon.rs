@@ -1,6 +1,6 @@
 use crate::probe;
 use crate::state::{self, State, StateKind, StoredState};
-use crate::title::{Spinner, TerminalTitle};
+use crate::title::{ProgramStatus, TerminalTitle};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::env;
@@ -9,7 +9,7 @@ use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const INTERRUPT_MARKER: &[u8] =
@@ -96,7 +96,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
     let mut mode = None;
     let mut static_title: Option<String> = None;
     let mut frame = 0;
-    let mut spinner = Spinner::EveryFrame;
+    let mut settled = ProgramStatus::Idle;
     let mut monitor_pid = initial_pid;
     let mut transcript_path = None;
     let mut transcript_start = 0;
@@ -123,24 +123,26 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 transcript_interrupted = false;
             }
             if mode != Some(new_mode) {
+                if matches!(new_mode, StateKind::Idle | StateKind::Unknown) {
+                    settled = match mode {
+                        Some(StateKind::Busy | StateKind::Pending | StateKind::Waiting) => {
+                            ProgramStatus::Done
+                        }
+                        Some(StateKind::Idle | StateKind::Unknown | StateKind::End) | None => {
+                            ProgramStatus::Idle
+                        }
+                    };
+                }
                 mode = Some(new_mode);
                 if new_mode == StateKind::Busy {
                     frame = 0;
-                    spinner = tty.spinner()?;
                 }
             }
 
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    let indicator = match spinner {
-                        Spinner::EveryFrame => Some(FRAMES[frame]),
-                        Spinner::EverySecond => Some(
-                            FRAMES[usize::try_from(state::epoch()).unwrap_or_default()
-                                % FRAMES.len()],
-                        ),
-                        Spinner::ByTerminal => None,
-                    };
+                    let indicator = tty.animates_title().then(|| FRAMES[frame]);
                     if tty.write(&title_text(&current.value, indicator, "Working"))? {
                         frame = (frame + 1) % FRAMES.len();
                     }
@@ -187,6 +189,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     if set_idle_if_unchanged(state_path, &current)? {
                         let title = title_text(&current.value, Some("✳"), "Ready");
                         mode = Some(StateKind::Idle);
+                        settled = ProgramStatus::Idle;
                         if tty.write(&title)? {
                             static_title = Some(title);
                         }
@@ -251,6 +254,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
                         let title = title_text(&current.value, Some("✳"), "Ready");
                         mode = Some(StateKind::Idle);
+                        settled = ProgramStatus::Done;
                         if tty.write(&title)? {
                             static_title = Some(title);
                         }
@@ -258,6 +262,10 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 }
             } else {
                 shell_watch = None;
+            }
+
+            if let Some(mode) = mode {
+                tty.report(program_status(mode, settled))?;
             }
         }
 
@@ -289,18 +297,14 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 while !tty.write("")? && Instant::now() < deadline {
                     thread::sleep(OUTPUT_SETTLE_PATIENCE);
                 }
+                tty.report(ProgramStatus::Cleared)?;
                 break;
             }
             last_liveness_check = now;
         }
 
         tty.poll()?;
-        let pause = if mode == Some(StateKind::Busy) && spinner == Spinner::EverySecond {
-            LOOP_PAUSE.min(until_next_second())
-        } else {
-            LOOP_PAUSE
-        };
-        thread::sleep(pause);
+        thread::sleep(LOOP_PAUSE);
     }
     Ok(())
 }
@@ -325,12 +329,13 @@ fn title_text(state: &State, indicator: Option<&str>, status: &str) -> String {
     }
 }
 
-fn until_next_second() -> Duration {
-    let into_second = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    Duration::from_nanos(u64::from(1_000_000_000 - into_second)) + Duration::from_millis(1)
+fn program_status(mode: StateKind, settled: ProgramStatus) -> ProgramStatus {
+    match mode {
+        StateKind::Busy | StateKind::Pending => ProgramStatus::Working,
+        StateKind::Waiting => ProgramStatus::Blocked,
+        StateKind::Idle | StateKind::Unknown => settled,
+        StateKind::End => ProgramStatus::Cleared,
+    }
 }
 
 fn executable_signature() -> Option<(u64, u64)> {

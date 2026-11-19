@@ -1,17 +1,18 @@
 //! Rex's control API, spoken over the server's socket so title updates never
 //! share the terminal's output stream. The title becomes the label of the Rex
 //! window, which Rex shows as its tab, while the session's terminal is the only
-//! block in that window.
+//! block in that window. Rex animates a working tab itself from the program
+//! status its terminal received (OSC 7501), which no control method can set.
 
-use crate::title::{Spinner, TerminalDetached};
+use crate::title::{ProgramStatus, TerminalDetached};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::env;
 use std::ffi::OsString;
-use std::fs;
-use std::io::{self, ErrorKind};
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Write};
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,7 @@ const PROTOCOL: &str = "rex.control.v1";
 const API_REVISION: u64 = 11;
 const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const LABEL_LIMIT: usize = 128;
+const CLAUDE_CODE: &str = "claude-code";
 
 #[derive(Debug)]
 struct Refusal {
@@ -169,6 +171,16 @@ impl Client {
     }
 }
 
+fn status_report(status: ProgramStatus) -> &'static str {
+    match status {
+        ProgramStatus::Idle => "\u{1b}]7501;state=idle:app=claude-title\u{1b}\\",
+        ProgramStatus::Working => "\u{1b}]7501;state=working:app=claude-title\u{1b}\\",
+        ProgramStatus::Blocked => "\u{1b}]7501;state=blocked:app=claude-title\u{1b}\\",
+        ProgramStatus::Done => "\u{1b}]7501;state=done:app=claude-title\u{1b}\\",
+        ProgramStatus::Cleared => "\u{1b}]7501;state=clear\u{1b}\\",
+    }
+}
+
 fn socket_path(server: &str) -> Option<PathBuf> {
     let mut rest = server.strip_prefix("unix://")?.as_bytes();
     let mut bytes = Vec::with_capacity(rest.len());
@@ -248,19 +260,28 @@ pub(crate) struct Connection {
     original_path: PathBuf,
     renamed: Option<String>,
     reclaim: bool,
+    terminal: File,
+    claude_reports: bool,
+    reported: Option<ProgramStatus>,
 }
 
 impl Connection {
-    pub(crate) fn open(owner: u32, original_path: &Path) -> Result<Self> {
+    pub(crate) fn open(owner: u32, original_path: &Path, terminal: File) -> Result<Self> {
         let (Ok(block_id), Ok(server)) = (env::var("REX_BLOCK"), env::var("REX_SERVER")) else {
             return Err(TerminalDetached.into());
         };
         let path = socket_path(&server)
             .ok_or_else(|| anyhow!("Rex server {server} isn't a local socket"))?;
-        Self::connect(&path, block_id, owner, original_path)
+        Self::connect(&path, block_id, owner, original_path, terminal)
     }
 
-    fn connect(path: &Path, block_id: String, owner: u32, original_path: &Path) -> Result<Self> {
+    fn connect(
+        path: &Path,
+        block_id: String,
+        owner: u32,
+        original_path: &Path,
+        terminal: File,
+    ) -> Result<Self> {
         let mut client = Client::connect(path)?;
         let mut events = Vec::new();
         client.request(
@@ -286,6 +307,9 @@ impl Connection {
             original_path: original_path.to_owned(),
             renamed: None,
             reclaim: false,
+            terminal,
+            claude_reports: false,
+            reported: None,
         };
         connection.locate(&mut events)?;
         connection.confirm_owner(&mut events)?;
@@ -316,9 +340,27 @@ impl Connection {
         Ok(())
     }
 
-    // Claude Code reports its own state to Rex (OSC 7501) unless
-    // CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set, and Rex then animates the tab.
-    pub(crate) fn spinner(&mut self) -> Result<Spinner> {
+    // A status report is the one thing written into the terminal Claude Code
+    // draws in, once per state change: 3,012 reports written during a 400-line
+    // reply from Claude Code 2.1.328 broke no line. Output that keeps the
+    // terminal's queue full is what a report can split.
+    pub(crate) fn report(&mut self, status: ProgramStatus) -> Result<()> {
+        if self.reported == Some(status) || self.claude_reports()? {
+            return Ok(());
+        }
+        self.terminal
+            .write_all(status_report(status).as_bytes())
+            .context("failed to report the program status")?;
+        self.reported = Some(status);
+        Ok(())
+    }
+
+    // Claude Code 2.1.328 reports its own state as claude-code when its
+    // terminal titles are on and Rex answered its startup query in time.
+    fn claude_reports(&mut self) -> Result<bool> {
+        if self.claude_reports {
+            return Ok(true);
+        }
         let mut events = Vec::new();
         let status = self.client.request(
             "com.superlogical.terminal.program_status",
@@ -326,16 +368,12 @@ impl Connection {
             &mut events,
         )?;
         self.observe(events);
-        let reported = status["records"].as_array().is_some_and(|records| {
+        self.claude_reports = status["records"].as_array().is_some_and(|records| {
             records
                 .iter()
-                .any(|record| record["owner"]["pid"] == self.owner)
+                .any(|record| record["app"] == CLAUDE_CODE && record["owner"]["pid"] == self.owner)
         });
-        Ok(if reported {
-            Spinner::ByTerminal
-        } else {
-            Spinner::EverySecond
-        })
+        Ok(self.claude_reports)
     }
 
     fn confirm_owner(&mut self, events: &mut Vec<Value>) -> Result<()> {
@@ -566,7 +604,7 @@ mod tests {
         views: usize,
         relabels: usize,
         child: u32,
-        status_owner: Option<u32>,
+        claude_status_owner: Option<u32>,
         before_next_request: Vec<(&'static str, String)>,
     }
 
@@ -676,9 +714,15 @@ mod tests {
                 "com.superlogical.terminal.process" => Ok(json!({"child": {"pid": self.child}})),
                 "com.superlogical.terminal.program_status" => {
                     let records: Vec<Value> = self
-                        .status_owner
+                        .claude_status_owner
                         .iter()
-                        .map(|pid| json!({"state": "working", "owner": {"pid": pid, "name": "claude"}}))
+                        .map(|pid| {
+                            json!({
+                                "state": "working",
+                                "app": CLAUDE_CODE,
+                                "owner": {"pid": pid, "name": "claude"},
+                            })
+                        })
                         .collect();
                     Ok(json!({"records": records}))
                 }
@@ -705,6 +749,7 @@ mod tests {
         rex: Arc<Mutex<Rex>>,
         path: PathBuf,
         original: PathBuf,
+        terminal: PathBuf,
         _directory: tempfile::TempDir,
     }
 
@@ -736,7 +781,7 @@ mod tests {
                 views: 0,
                 relabels: 0,
                 child,
-                status_owner: None,
+                claude_status_owner: None,
                 before_next_request: Vec::new(),
             }));
             let served = Arc::clone(&rex);
@@ -745,6 +790,7 @@ mod tests {
                 rex,
                 path,
                 original: directory.path().join("ttys001.rex.json"),
+                terminal: directory.path().join("ttys001"),
                 _directory: directory,
             }
         }
@@ -755,7 +801,15 @@ mod tests {
                 CLAUDE.to_owned(),
                 std::process::id(),
                 &self.original,
+                File::options()
+                    .create(true)
+                    .append(true)
+                    .open(&self.terminal)?,
             )
+        }
+
+        fn reports(&self) -> String {
+            fs::read_to_string(&self.terminal).unwrap()
         }
 
         fn rex(&self) -> MutexGuard<'_, Rex> {
@@ -852,14 +906,47 @@ mod tests {
     }
 
     #[test]
-    fn a_session_reporting_its_own_status_leaves_the_spinner_to_rex() {
+    fn each_status_change_is_reported_once() {
         let fake = Fake::start();
         let mut connection = fake.connect().unwrap();
-        assert_eq!(connection.spinner().unwrap(), Spinner::EverySecond);
-        fake.rex().status_owner = Some(std::process::id() + 1);
-        assert_eq!(connection.spinner().unwrap(), Spinner::EverySecond);
-        fake.rex().status_owner = Some(std::process::id());
-        assert_eq!(connection.spinner().unwrap(), Spinner::ByTerminal);
+        for status in [
+            ProgramStatus::Working,
+            ProgramStatus::Working,
+            ProgramStatus::Blocked,
+            ProgramStatus::Working,
+            ProgramStatus::Done,
+            ProgramStatus::Done,
+            ProgramStatus::Cleared,
+        ] {
+            connection.report(status).unwrap();
+        }
+        assert_eq!(
+            fake.reports(),
+            [
+                "\u{1b}]7501;state=working:app=claude-title\u{1b}\\",
+                "\u{1b}]7501;state=blocked:app=claude-title\u{1b}\\",
+                "\u{1b}]7501;state=working:app=claude-title\u{1b}\\",
+                "\u{1b}]7501;state=done:app=claude-title\u{1b}\\",
+                "\u{1b}]7501;state=clear\u{1b}\\",
+            ]
+            .concat()
+        );
+    }
+
+    #[test]
+    fn a_session_reporting_its_own_status_is_left_to_report() {
+        let fake = Fake::start();
+        let mut connection = fake.connect().unwrap();
+        fake.rex().claude_status_owner = Some(std::process::id() + 1);
+        connection.report(ProgramStatus::Working).unwrap();
+        fake.rex().claude_status_owner = Some(std::process::id());
+        connection.report(ProgramStatus::Done).unwrap();
+        fake.rex().claude_status_owner = None;
+        connection.report(ProgramStatus::Working).unwrap();
+        assert_eq!(
+            fake.reports(),
+            "\u{1b}]7501;state=working:app=claude-title\u{1b}\\"
+        );
     }
 
     #[test]
