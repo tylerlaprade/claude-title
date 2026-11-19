@@ -130,7 +130,12 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    if tty.write(&title_text(&current.value, FRAMES[frame], "Working"))? {
+                    let indicator = if tty.animates() {
+                        FRAMES[frame]
+                    } else {
+                        FRAMES[0]
+                    };
+                    if tty.write(&title_text(&current.value, indicator, "Working"))? {
                         frame = (frame + 1) % FRAMES.len();
                     }
                 }

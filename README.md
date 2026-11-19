@@ -51,7 +51,9 @@ macOS may request Automation access on first use. Title updates target an
 existing Ghostty process and never reopen the app after you quit it. Rex
 (control API revision 11 or later) shows the title as the tab's label, set
 through the Rex server's socket, so title updates stay out of terminal output
-there too. A Rex tab split into panes keeps its own label, a name you give the
+there too. The spinner holds still in Rex: each label change costs the Rex app
+about 40 ms of CPU, so animating it would keep the app near 40% of a core while
+Claude works. A Rex tab split into panes keeps its own label, a name you give the
 tab while Claude Code runs there stays, and the tab's earlier label returns
 when the session ends. A Rex session that cannot reach its server shows no
 title rather than write one into the terminal. Other terminals use OSC 0 with a

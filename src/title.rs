@@ -49,6 +49,17 @@ impl TerminalTitle {
         open_terminal(tty).map(Self::Osc)
     }
 
+    // Every label change costs the Rex app about 40 ms of CPU, so a spinner
+    // there would hold it near 40% of a core while Claude works.
+    pub(crate) fn animates(&self) -> bool {
+        match self {
+            Self::Osc(_) => true,
+            #[cfg(target_os = "macos")]
+            Self::Ghostty(_) => true,
+            Self::Rex(_) => false,
+        }
+    }
+
     pub(crate) fn poll(&mut self) -> Result<()> {
         match self {
             Self::Osc(_) => Ok(()),

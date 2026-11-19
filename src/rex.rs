@@ -540,6 +540,7 @@ mod tests {
         revision: u64,
         seq: u64,
         views: usize,
+        relabels: usize,
         child: u32,
         before_next_request: Vec<(&'static str, String)>,
     }
@@ -649,6 +650,7 @@ mod tests {
                 "session.view" => Ok(self.view()),
                 "com.superlogical.terminal.process" => Ok(json!({"child": {"pid": self.child}})),
                 "session.set_window_label" => {
+                    self.relabels += 1;
                     let label = payload["label"].as_str().unwrap_or_default().trim();
                     if label.chars().count() > LABEL_LIMIT || label.chars().any(char::is_control) {
                         return Err(("bad_request", "invalid label".to_owned()));
@@ -699,6 +701,7 @@ mod tests {
                 revision: 1,
                 seq: 0,
                 views: 0,
+                relabels: 0,
                 child,
                 before_next_request: Vec::new(),
             }));
@@ -812,6 +815,16 @@ mod tests {
         assert_eq!(label("one\u{85}two\u{1b}"), "onetwo");
         let long = format!("{} tail", "⠋".repeat(LABEL_LIMIT - 1));
         assert_eq!(label(&long), "⠋".repeat(LABEL_LIMIT - 1));
+    }
+
+    #[test]
+    fn an_unchanged_title_sends_nothing_to_rex() {
+        let fake = Fake::start();
+        let mut connection = fake.connect().unwrap();
+        for _ in 0..5 {
+            connection.write("⠋ Working | app").unwrap();
+        }
+        assert_eq!(fake.rex().relabels, 1);
     }
 
     #[test]
