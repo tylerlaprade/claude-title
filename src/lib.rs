@@ -4,6 +4,7 @@ pub mod daemon;
 mod ghostty;
 pub mod hook;
 pub mod probe;
+mod rex;
 pub mod session_title;
 pub mod state;
 mod subprocess;

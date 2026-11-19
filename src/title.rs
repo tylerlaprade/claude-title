@@ -15,6 +15,7 @@ pub(crate) enum TerminalTitle {
     Osc(File),
     #[cfg(target_os = "macos")]
     Ghostty(crate::ghostty::Connection),
+    Rex(Box<crate::rex::Connection>),
 }
 
 #[derive(Debug)]
@@ -22,23 +23,39 @@ pub(crate) struct TerminalDetached;
 
 impl std::fmt::Display for TerminalDetached {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("session no longer belongs to a Ghostty process")
+        f.write_str("session no longer belongs to its terminal")
     }
 }
 
 impl std::error::Error for TerminalDetached {}
 
 impl TerminalTitle {
-    pub(crate) fn open(tty: &Path, owner: u32) -> Result<Self> {
-        if std::env::var("TERM_PROGRAM").as_deref() == Ok("ghostty") {
-            let ghostty =
-                crate::probe::terminal_ancestor(owner, "ghostty")?.ok_or(TerminalDetached)?;
-            #[cfg(target_os = "macos")]
-            return crate::ghostty::Connection::open(tty, ghostty).map(Self::Ghostty);
-            #[cfg(not(target_os = "macos"))]
-            let _ = ghostty;
+    pub(crate) fn open(tty: &Path, state: &Path, owner: u32) -> Result<Self> {
+        match std::env::var("TERM_PROGRAM").as_deref() {
+            Ok("ghostty") => {
+                let ghostty =
+                    crate::probe::terminal_ancestor(owner, "ghostty")?.ok_or(TerminalDetached)?;
+                #[cfg(target_os = "macos")]
+                return crate::ghostty::Connection::open(tty, ghostty).map(Self::Ghostty);
+                #[cfg(not(target_os = "macos"))]
+                let _ = ghostty;
+            }
+            Ok("rex") => {
+                return crate::rex::Connection::open(owner, &state.with_extension("rex.json"))
+                    .map(|connection| Self::Rex(Box::new(connection)));
+            }
+            _ => {}
         }
         open_terminal(tty).map(Self::Osc)
+    }
+
+    pub(crate) fn poll(&mut self) -> Result<()> {
+        match self {
+            Self::Osc(_) => Ok(()),
+            #[cfg(target_os = "macos")]
+            Self::Ghostty(_) => Ok(()),
+            Self::Rex(connection) => connection.poll(),
+        }
     }
 
     pub(crate) fn write(&mut self, title: &str) -> Result<bool> {
@@ -53,6 +70,7 @@ impl TerminalTitle {
             }
             #[cfg(target_os = "macos")]
             Self::Ghostty(connection) => connection.write(&title)?,
+            Self::Rex(connection) => connection.write(&title)?,
         }
         Ok(true)
     }

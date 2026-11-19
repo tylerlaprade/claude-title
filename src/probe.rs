@@ -224,27 +224,38 @@ impl ProcessTable {
         }
         saw_tail
     }
+
+    fn ancestor(&self, mut pid: u32, wanted: impl Fn(u32) -> bool) -> anyhow::Result<Option<u32>> {
+        for _ in 0..=self.parents.len() {
+            if wanted(pid) {
+                return Ok(Some(pid));
+            }
+            if pid <= 1 {
+                return Ok(None);
+            }
+            pid = *self.parents.get(&pid).ok_or_else(|| {
+                anyhow::anyhow!("session process disappeared during terminal lookup")
+            })?;
+        }
+        anyhow::bail!("process ancestry contains a cycle");
+    }
 }
 
-pub(crate) fn terminal_ancestor(mut pid: u32, terminal: &str) -> anyhow::Result<Option<u32>> {
+pub(crate) fn terminal_ancestor(pid: u32, terminal: &str) -> anyhow::Result<Option<u32>> {
     let table = ProcessTable::capture()?;
-    for _ in 0..=table.parents.len() {
-        if table
+    table.ancestor(pid, |candidate| {
+        table
             .programs
-            .get(&pid)
+            .get(&candidate)
             .is_some_and(|program| program == terminal)
-        {
-            return Ok(Some(pid));
-        }
-        if pid <= 1 {
-            return Ok(None);
-        }
-        pid = *table
-            .parents
-            .get(&pid)
-            .ok_or_else(|| anyhow::anyhow!("session process disappeared during terminal lookup"))?;
-    }
-    anyhow::bail!("process ancestry contains a cycle");
+    })
+}
+
+pub(crate) fn descends_from(pid: u32, ancestor: u32) -> anyhow::Result<bool> {
+    let table = ProcessTable::capture()?;
+    Ok(table
+        .ancestor(pid, |candidate| candidate == ancestor)?
+        .is_some())
 }
 
 fn listening_pids(pids: &HashSet<u32>) -> HashSet<u32> {

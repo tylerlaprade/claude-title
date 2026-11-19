@@ -48,8 +48,14 @@ Removes the hooks and restores the previous title setting.
 macOS Ghostty 1.3.1 or later uses its native AppleScript API so title updates
 cannot split terminal output. AppleScript support must be enabled in Ghostty;
 macOS may request Automation access on first use. Title updates target an
-existing Ghostty process and never reopen the app after you quit it. Other
-terminals use OSC 0 with a best-effort output queue check. Shell probing needs
+existing Ghostty process and never reopen the app after you quit it. Rex
+(control API revision 11 or later) shows the title as the tab's label, set
+through the Rex server's socket, so title updates stay out of terminal output
+there too. A Rex tab split into panes keeps its own label, a name you give the
+tab while Claude Code runs there stays, and the tab's earlier label returns
+when the session ends. A Rex session that cannot reach its server shows no
+title rather than write one into the terminal. Other terminals use OSC 0 with a
+best-effort output queue check. Shell probing needs
 `lsof` (preinstalled on macOS). A
 `docker compose up` stack listens outside the shell's process tree, so it
 holds the waiting title.
@@ -59,11 +65,11 @@ overwrite the main session's title, except that a subagent's permission prompt
 shows Action required until it is answered. Claude Code reports no event at the
 moment you approve a prompt, so the title changes when the approved tool
 finishes. Transcript name lookup reads only appended
-records after the first scan. Process probes and Ghostty replies have bounded
-waits. The daemon retries a failed connection while its owning session remains
-alive, so restoring a session does not require another prompt to initialize its
-title. Detached workers with an inherited Ghostty environment do not open title
-connections. Startup and transport errors are retained beside the per-terminal
+records after the first scan. Process probes and Ghostty and Rex replies have
+bounded waits. The daemon retries a failed connection while its owning session
+remains alive, so restoring a session does not require another prompt to
+initialize its title. Detached workers with an inherited Ghostty or Rex
+environment do not open title connections. Startup and transport errors are retained beside the per-terminal
 state in the temporary `claude-title-<uid>` directory as `<tty>.log`.
 
 ## License

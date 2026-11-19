@@ -53,7 +53,7 @@ pub fn run(tty_path: &Path, state_path: &Path, lock_path: &Path, initial_pid: u3
     lock.flush()?;
 
     let result = supervise_title(state_path, initial_pid, Duration::from_secs(1), |owner| {
-        TerminalTitle::open(tty_path, owner)
+        TerminalTitle::open(tty_path, state_path, owner)
             .and_then(|mut tty| run_loop(&mut tty, state_path, owner))
     });
     lock.set_len(0)?;
@@ -283,6 +283,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
             last_liveness_check = now;
         }
 
+        tty.poll()?;
         thread::sleep(Duration::from_millis(100));
     }
     Ok(())
