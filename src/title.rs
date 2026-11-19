@@ -18,6 +18,16 @@ pub(crate) enum TerminalTitle {
     Rex(Box<crate::rex::Connection>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Spinner {
+    EveryFrame,
+    // Every Rex label change costs the Rex app about 40 ms of CPU, and changes
+    // that land together cost about as much as one, so every tab's spinner
+    // steps on the same wall-clock second.
+    EverySecond,
+    ByTerminal,
+}
+
 #[derive(Debug)]
 pub(crate) struct TerminalDetached;
 
@@ -49,14 +59,12 @@ impl TerminalTitle {
         open_terminal(tty).map(Self::Osc)
     }
 
-    // Every label change costs the Rex app about 40 ms of CPU, so a spinner
-    // there would hold it near 40% of a core while Claude works.
-    pub(crate) fn animates(&self) -> bool {
+    pub(crate) fn spinner(&mut self) -> Result<Spinner> {
         match self {
-            Self::Osc(_) => true,
+            Self::Osc(_) => Ok(Spinner::EveryFrame),
             #[cfg(target_os = "macos")]
-            Self::Ghostty(_) => true,
-            Self::Rex(_) => false,
+            Self::Ghostty(_) => Ok(Spinner::EveryFrame),
+            Self::Rex(connection) => connection.spinner(),
         }
     }
 

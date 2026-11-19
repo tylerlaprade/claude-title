@@ -3,7 +3,7 @@
 //! window, which Rex shows as its tab, while the session's terminal is the only
 //! block in that window.
 
-use crate::title::TerminalDetached;
+use crate::title::{Spinner, TerminalDetached};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -236,6 +236,7 @@ fn sole_window(view: &Value, window_id: &str, block_id: &str) -> Option<Window> 
 pub(crate) struct Connection {
     client: Client,
     block_id: String,
+    owner: u32,
     session_id: String,
     window: Option<Window>,
     revision: u64,
@@ -273,6 +274,7 @@ impl Connection {
         let mut connection = Self {
             client,
             block_id,
+            owner,
             session_id: String::new(),
             window: None,
             revision: 0,
@@ -286,7 +288,7 @@ impl Connection {
             reclaim: false,
         };
         connection.locate(&mut events)?;
-        connection.confirm_owner(owner, &mut events)?;
+        connection.confirm_owner(&mut events)?;
         connection.observe(events);
         Ok(connection)
     }
@@ -314,7 +316,29 @@ impl Connection {
         Ok(())
     }
 
-    fn confirm_owner(&mut self, owner: u32, events: &mut Vec<Value>) -> Result<()> {
+    // Claude Code reports its own state to Rex (OSC 7501) unless
+    // CLAUDE_CODE_DISABLE_TERMINAL_TITLE is set, and Rex then animates the tab.
+    pub(crate) fn spinner(&mut self) -> Result<Spinner> {
+        let mut events = Vec::new();
+        let status = self.client.request(
+            "com.superlogical.terminal.program_status",
+            &json!({"session_id": self.session_id, "block_id": self.block_id, "args": {}}),
+            &mut events,
+        )?;
+        self.observe(events);
+        let reported = status["records"].as_array().is_some_and(|records| {
+            records
+                .iter()
+                .any(|record| record["owner"]["pid"] == self.owner)
+        });
+        Ok(if reported {
+            Spinner::ByTerminal
+        } else {
+            Spinner::EverySecond
+        })
+    }
+
+    fn confirm_owner(&mut self, events: &mut Vec<Value>) -> Result<()> {
         let process = self.client.request(
             "com.superlogical.terminal.process",
             &json!({"session_id": self.session_id, "block_id": self.block_id, "args": {}}),
@@ -324,7 +348,7 @@ impl Connection {
             .as_u64()
             .and_then(|pid| u32::try_from(pid).ok())
             .ok_or(TerminalDetached)?;
-        if !crate::probe::descends_from(owner, child)? {
+        if !crate::probe::descends_from(self.owner, child)? {
             return Err(TerminalDetached.into());
         }
         Ok(())
@@ -542,6 +566,7 @@ mod tests {
         views: usize,
         relabels: usize,
         child: u32,
+        status_owner: Option<u32>,
         before_next_request: Vec<(&'static str, String)>,
     }
 
@@ -649,6 +674,14 @@ mod tests {
                 }
                 "session.view" => Ok(self.view()),
                 "com.superlogical.terminal.process" => Ok(json!({"child": {"pid": self.child}})),
+                "com.superlogical.terminal.program_status" => {
+                    let records: Vec<Value> = self
+                        .status_owner
+                        .iter()
+                        .map(|pid| json!({"state": "working", "owner": {"pid": pid, "name": "claude"}}))
+                        .collect();
+                    Ok(json!({"records": records}))
+                }
                 "session.set_window_label" => {
                     self.relabels += 1;
                     let label = payload["label"].as_str().unwrap_or_default().trim();
@@ -703,6 +736,7 @@ mod tests {
                 views: 0,
                 relabels: 0,
                 child,
+                status_owner: None,
                 before_next_request: Vec::new(),
             }));
             let served = Arc::clone(&rex);
@@ -815,6 +849,17 @@ mod tests {
         assert_eq!(label("one\u{85}two\u{1b}"), "onetwo");
         let long = format!("{} tail", "⠋".repeat(LABEL_LIMIT - 1));
         assert_eq!(label(&long), "⠋".repeat(LABEL_LIMIT - 1));
+    }
+
+    #[test]
+    fn a_session_reporting_its_own_status_leaves_the_spinner_to_rex() {
+        let fake = Fake::start();
+        let mut connection = fake.connect().unwrap();
+        assert_eq!(connection.spinner().unwrap(), Spinner::EverySecond);
+        fake.rex().status_owner = Some(std::process::id() + 1);
+        assert_eq!(connection.spinner().unwrap(), Spinner::EverySecond);
+        fake.rex().status_owner = Some(std::process::id());
+        assert_eq!(connection.spinner().unwrap(), Spinner::ByTerminal);
     }
 
     #[test]

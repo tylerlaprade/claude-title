@@ -1,6 +1,6 @@
 use crate::probe;
 use crate::state::{self, State, StateKind, StoredState};
-use crate::title::TerminalTitle;
+use crate::title::{Spinner, TerminalTitle};
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::env;
@@ -9,7 +9,7 @@ use std::io::{self, BufRead, BufReader, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const INTERRUPT_MARKER: &[u8] =
@@ -18,6 +18,7 @@ const USER_RECORD: &[u8] = b"\"type\":\"user\"";
 const SHELL_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const OUTPUT_SETTLE_PATIENCE: Duration = Duration::from_millis(50);
 const EXIT_CLEAR_PATIENCE: Duration = Duration::from_secs(2);
+const LOOP_PAUSE: Duration = Duration::from_millis(100);
 
 // A shell that vanishes after finishing wakes the session within a beat, and
 // that wake rewrites the state before two probes pass. Two consecutive misses
@@ -95,6 +96,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
     let mut mode = None;
     let mut static_title: Option<String> = None;
     let mut frame = 0;
+    let mut spinner = Spinner::EveryFrame;
     let mut monitor_pid = initial_pid;
     let mut transcript_path = None;
     let mut transcript_start = 0;
@@ -124,35 +126,39 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 mode = Some(new_mode);
                 if new_mode == StateKind::Busy {
                     frame = 0;
+                    spinner = tty.spinner()?;
                 }
             }
 
             match new_mode {
                 StateKind::Busy => {
                     static_title = None;
-                    let indicator = if tty.animates() {
-                        FRAMES[frame]
-                    } else {
-                        FRAMES[0]
+                    let indicator = match spinner {
+                        Spinner::EveryFrame => Some(FRAMES[frame]),
+                        Spinner::EverySecond => Some(
+                            FRAMES[usize::try_from(state::epoch()).unwrap_or_default()
+                                % FRAMES.len()],
+                        ),
+                        Spinner::ByTerminal => None,
                     };
                     if tty.write(&title_text(&current.value, indicator, "Working"))? {
                         frame = (frame + 1) % FRAMES.len();
                     }
                 }
                 StateKind::Idle | StateKind::Unknown => {
-                    let title = title_text(&current.value, "✳", "Ready");
+                    let title = title_text(&current.value, Some("✳"), "Ready");
                     if static_title.as_ref() != Some(&title) && tty.write(&title)? {
                         static_title = Some(title);
                     }
                 }
                 StateKind::Pending => {
-                    let title = title_text(&current.value, "⧗", "Waiting");
+                    let title = title_text(&current.value, Some("⧗"), "Waiting");
                     if static_title.as_ref() != Some(&title) && tty.write(&title)? {
                         static_title = Some(title);
                     }
                 }
                 StateKind::Waiting => {
-                    let title = title_text(&current.value, "⚠", "Action required");
+                    let title = title_text(&current.value, Some("⚠"), "Action required");
                     if static_title.as_ref() != Some(&title) && tty.write(&title)? {
                         static_title = Some(title);
                     }
@@ -179,7 +185,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                 last_scan = now;
                 if interrupted && !was_interrupted {
                     if set_idle_if_unchanged(state_path, &current)? {
-                        let title = title_text(&current.value, "✳", "Ready");
+                        let title = title_text(&current.value, Some("✳"), "Ready");
                         mode = Some(StateKind::Idle);
                         if tty.write(&title)? {
                             static_title = Some(title);
@@ -243,7 +249,7 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
                     }
                     watch.shells = kept;
                     if watch.shells.is_empty() && set_idle_if_unchanged(state_path, &current)? {
-                        let title = title_text(&current.value, "✳", "Ready");
+                        let title = title_text(&current.value, Some("✳"), "Ready");
                         mode = Some(StateKind::Idle);
                         if tty.write(&title)? {
                             static_title = Some(title);
@@ -289,7 +295,12 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
         }
 
         tty.poll()?;
-        thread::sleep(Duration::from_millis(100));
+        let pause = if mode == Some(StateKind::Busy) && spinner == Spinner::EverySecond {
+            LOOP_PAUSE.min(until_next_second())
+        } else {
+            LOOP_PAUSE
+        };
+        thread::sleep(pause);
     }
     Ok(())
 }
@@ -298,16 +309,28 @@ fn run_loop(tty: &mut TerminalTitle, state_path: &Path, initial_pid: u32) -> Res
 // context and trails. Claude Code 2.1.296 also writes a generated custom-title
 // when forking a conversation, and the record carries no source, so a fork's
 // generated name reads as assigned.
-fn title_text(state: &State, indicator: &str, status: &str) -> String {
+fn title_text(state: &State, indicator: Option<&str>, status: &str) -> String {
     let project = &state.project;
-    match state
+    let fields = match state
         .custom_title
         .as_deref()
         .filter(|name| !name.is_empty())
     {
-        Some(name) => format!("{indicator} {name} | {status} | {project}"),
-        None => format!("{indicator} {status} | {project}"),
+        Some(name) => format!("{name} | {status} | {project}"),
+        None => format!("{status} | {project}"),
+    };
+    match indicator {
+        Some(indicator) => format!("{indicator} {fields}"),
+        None => fields,
     }
+}
+
+fn until_next_second() -> Duration {
+    let into_second = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    Duration::from_nanos(u64::from(1_000_000_000 - into_second)) + Duration::from_millis(1)
 }
 
 fn executable_signature() -> Option<(u64, u64)> {
